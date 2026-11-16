@@ -4,14 +4,21 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
+import { DeferredPromise } from '../../../../../../base/common/async.js';
+import { DisposableStore } from '../../../../../../base/common/lifecycle.js';
+import { Emitter, Event } from '../../../../../../base/common/event.js';
 import { autorun, constObservable, observableValue } from '../../../../../../base/common/observable.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../base/test/common/utils.js';
+import { URI } from '../../../../../../base/common/uri.js';
+import { Codicon } from '../../../../../../base/common/codicons.js';
 import { NullLogService } from '../../../../../../platform/log/common/log.js';
-import { InMemoryStorageService } from '../../../../../../platform/storage/common/storage.js';
+import { InMemoryStorageService, StorageScope, StorageTarget } from '../../../../../../platform/storage/common/storage.js';
 import { getSessionApplication } from '../../../../../services/sessions/common/sessionApplication.js';
 import { ISession, ISessionEnvironment, ISessionWorkspace } from '../../../../../services/sessions/common/session.js';
 import { buildTestSession, buildTestWorkspace } from '../../common/testSessionBuilder.js';
-import { getInboxWorkspaceFilter, getInboxWorkspaceOptions, getSessionFilterOptions, sessionFilterKey, SessionsListFilters } from '../../../browser/views/sessionsListFilters.js';
+import { IWorkspace, IWorkspaceContextService, IWorkspaceFolder, IWorkspaceFoldersChangeEvent } from '../../../../../../platform/workspace/common/workspace.js';
+import { upcastPartial } from '../../../../../../base/test/common/mock.js';
+import { getInboxWorkspaceFilter, getInboxWorkspaceOptions, getSessionFilterOptions, getWorktreeFilterKeys, listsQuickChatsIn, sessionFilterKey, SessionsListFilters, SessionsWorktreeOpener } from '../../../browser/views/sessionsListFilters.js';
 
 suite('SessionsListFilters', () => {
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
@@ -20,6 +27,229 @@ suite('SessionsListFilters', () => {
 	function createFilters(storage = store.add(new InMemoryStorageService())): SessionsListFilters {
 		return store.add(new SessionsListFilters(storage, store.add(new NullLogService())));
 	}
+
+	test('offers no worktree folder whose listed sessions are all archived, shows all while the selected one\'s are, and it again as one is unarchived', () => {
+		const archived = observableValue('archived', false);
+		const inFolder = (id: string, path: string, isArchived = constObservable(false)): ISession => {
+			const root = URI.file(path);
+			const workspace: ISessionWorkspace = {
+				uri: root, label: id, icon: Codicon.folder, requiresWorkspaceTrust: false, isVirtualWorkspace: false,
+				folders: [{ root, workingDirectory: root, name: id, description: undefined, gitRepository: undefined }],
+			};
+			return { ...buildTestSession({ id, title: id }).session, workspace: constObservable(workspace), isArchived };
+		};
+		const main = inFolder('main', '/work/vscode');
+		const first = inFolder('first', '/work/vscode.worktrees/first', archived);
+		const second = inFolder('second', '/work/vscode.worktrees/second');
+		const sessions = [main, first, second];
+		const filters = createFilters();
+		const state = () => {
+			const available = getWorktreeFilterKeys(sessions, listAll);
+			const options = getSessionFilterOptions(sessions, [], listAll).filter(option => option.filter.kind === 'worktree');
+			const selected = filters.getSelectedWorktree(available);
+			return {
+				options: options.map(option => option.label),
+				checked: selected === undefined ? 'All Worktrees' : options.find(option => option.filter.id === selected)?.label,
+				visible: sessions.filter(session => filters.matches(session, false, available)).map(session => session.sessionId),
+			};
+		};
+		filters.setSelectedWorktree(getSessionFilterOptions(sessions, [], listAll).find(option => option.filter.kind === 'worktree' && option.label === 'first')!.filter.id);
+		const selected = state();
+		archived.set(true, undefined);
+		const lastArchived = state();
+		archived.set(false, undefined);
+
+		assert.deepStrictEqual({ selected, lastArchived, unarchived: state() }, {
+			selected: { options: ['vscode', 'first', 'second'], checked: 'first', visible: ['first'] },
+			lastArchived: { options: ['vscode', 'second'], checked: 'All Worktrees', visible: ['main', 'first', 'second'] },
+			unarchived: { options: ['vscode', 'first', 'second'], checked: 'first', visible: ['first'] },
+		});
+	});
+
+	test('picking a worktree folder opens the session of it shown last, else its most recent one not archived, and nothing while the shown one works in it', async () => {
+		const inFolder = (id: string, path: string, minutesAgo: number, isArchived = false): ISession => {
+			const root = URI.file(path);
+			const workspace: ISessionWorkspace = {
+				uri: root, label: id, icon: Codicon.folder, requiresWorkspaceTrust: false, isVirtualWorkspace: false,
+				folders: [{ root, workingDirectory: root, name: id, description: undefined, gitRepository: undefined }],
+			};
+			return { ...buildTestSession({ id, title: id, minutesAgo, isArchived }).session, workspace: constObservable(workspace) };
+		};
+		const main = inFolder('main', '/work/vscode', 1);
+		const olderArchived = observableValue('olderArchived', false);
+		const older = { ...inFolder('older', '/work/vscode.worktrees/first', 30), isArchived: olderArchived };
+		const newer = inFolder('newer', '/work/vscode.worktrees/first', 20);
+		// The most recent of the folder, but archived
+		const archived = inFolder('archived', '/work/vscode.worktrees/first', 5, true);
+		const second = inFolder('second', '/work/vscode.worktrees/second', 10);
+		const sessions = [main, older, newer, archived, second];
+		const first = getSessionFilterOptions(sessions, [], listAll).find(option => option.filter.kind === 'worktree' && option.label === 'first')!.filter.id;
+		const shown = observableValue<ISession | undefined>('shown', main);
+		const opened: string[] = [];
+		const opener = store.add(new SessionsWorktreeOpener(shown, () => sessions, async () => true, session => opened.push(session.sessionId), Event.None));
+
+		await opener.open(first);
+		const mostRecent = [...opened];
+		// The user shows the older one of the folder, then another folder's
+		shown.set(older, undefined);
+		shown.set(second, undefined);
+		await opener.open(first);
+		const remembered = opened.slice(mostRecent.length);
+		shown.set(newer, undefined);
+		await opener.open(first);
+		const alreadyShown = opened.slice(mostRecent.length + remembered.length);
+		// The remembered one is archived, then works in another folder: the folder's most recent one opens instead
+		shown.set(older, undefined);
+		shown.set(second, undefined);
+		olderArchived.set(true, undefined);
+		await opener.open(first);
+		olderArchived.set(false, undefined);
+		const movedRoot = URI.file('/work/vscode.worktrees/second');
+		const moved = { ...older, workspace: constObservable<ISessionWorkspace>({ uri: movedRoot, label: 'older', icon: Codicon.folder, requiresWorkspaceTrust: false, isVirtualWorkspace: false, folders: [{ root: movedRoot, workingDirectory: movedRoot, name: 'older', description: undefined, gitRepository: undefined }] }) };
+		sessions.splice(sessions.indexOf(older), 1, moved);
+		await opener.open(first);
+
+		assert.deepStrictEqual({ mostRecent, remembered, alreadyShown, fallback: opened.slice(mostRecent.length + remembered.length + alreadyShown.length) }, {
+			mostRecent: ['newer'],
+			remembered: ['older'],
+			alreadyShown: [],
+			fallback: ['newer', 'newer'],
+		});
+	});
+
+	test('opens nothing where the session it asked for is archived, removed or moved meanwhile, or it was disposed, rather than another not asked for', async () => {
+		const workspaceOf = (path: string): ISessionWorkspace => {
+			const root = URI.file(path);
+			return { uri: root, label: 'w', icon: Codicon.folder, requiresWorkspaceTrust: false, isVirtualWorkspace: false, folders: [{ root, workingDirectory: root, name: 'w', description: undefined, gitRepository: undefined }] };
+		};
+		const run = async (change: 'archive' | 'remove' | 'move' | 'dispose' | 'none') => {
+			const archived = observableValue('archived', false);
+			const workspace = observableValue<ISessionWorkspace | undefined>('workspace', workspaceOf('/work/vscode.worktrees/first'));
+			const remembered: ISession = { ...buildTestSession({ id: 'remembered', title: 'remembered', minutesAgo: 30 }).session, workspace, isArchived: archived };
+			const other = { ...buildTestSession({ id: 'other', title: 'other', minutesAgo: 10 }).session, workspace: constObservable(workspaceOf('/work/vscode.worktrees/first')) };
+			const elsewhere = { ...buildTestSession({ id: 'elsewhere', title: 'elsewhere', minutesAgo: 5 }).session, workspace: constObservable(workspaceOf('/work/vscode.worktrees/second')) };
+			let sessions: ISession[] = [remembered, other, elsewhere];
+			const shown = observableValue<ISession | undefined>('shown', remembered);
+			const allowed = new DeferredPromise<boolean>();
+			const opened: string[] = [];
+			const disposables = new DisposableStore();
+			const opener = disposables.add(new SessionsWorktreeOpener(shown, () => sessions, () => allowed.p, session => opened.push(session.sessionId), Event.None));
+			shown.set(elsewhere, undefined);
+			const opening = opener.open(getSessionFilterOptions(sessions, [], listAll).find(option => option.filter.kind === 'worktree' && option.label === 'first')!.filter.id);
+			if (change === 'archive') {
+				archived.set(true, undefined);
+			} else if (change === 'remove') {
+				sessions = [other, elsewhere];
+			} else if (change === 'move') {
+				workspace.set(workspaceOf('/work/vscode.worktrees/second'), undefined);
+			} else if (change === 'dispose') {
+				disposables.dispose();
+			}
+			allowed.complete(true);
+			await opening;
+			disposables.dispose();
+			return opened;
+		};
+
+		assert.deepStrictEqual({
+			unchanged: await run('none'),
+			archived: await run('archive'),
+			removed: await run('remove'),
+			moved: await run('move'),
+			disposed: await run('dispose'),
+		}, { unchanged: ['remembered'], archived: [], removed: [], moved: [], disposed: [] });
+	});
+
+	test('remembers the session shown of a worktree folder also once its workspace becomes known after it shows', async () => {
+		const workspaceOf = (path: string): ISessionWorkspace => {
+			const root = URI.file(path);
+			return { uri: root, label: 'first', icon: Codicon.folder, requiresWorkspaceTrust: false, isVirtualWorkspace: false, folders: [{ root, workingDirectory: root, name: 'first', description: undefined, gitRepository: undefined }] };
+		};
+		const inFolder = (id: string, path: string | undefined, minutesAgo: number): ISession & { readonly hydrate: (path: string) => void } => {
+			const workspace = observableValue<ISessionWorkspace | undefined>(`workspace-${id}`, path ? workspaceOf(path) : undefined);
+			return { ...buildTestSession({ id, title: id, minutesAgo }).session, workspace, hydrate: folder => workspace.set(workspaceOf(folder), undefined) };
+		};
+		// Shown before its workspace is known, as a restored session is
+		const hydrating = inFolder('hydrating', undefined, 30);
+		const newer = inFolder('newer', '/work/vscode.worktrees/first', 10);
+		const elsewhere = inFolder('elsewhere', '/work/vscode.worktrees/second', 5);
+		const sessions = [hydrating, newer, elsewhere];
+		const shown = observableValue<ISession | undefined>('shown', hydrating);
+		const opened: string[] = [];
+		const opener = store.add(new SessionsWorktreeOpener(shown, () => sessions, async () => true, session => opened.push(session.sessionId), Event.None));
+		hydrating.hydrate('/work/vscode.worktrees/first');
+		shown.set(elsewhere, undefined);
+		await opener.open(getSessionFilterOptions(sessions, [], listAll).find(option => option.filter.kind === 'worktree' && option.label === 'first')!.filter.id);
+
+		assert.deepStrictEqual(opened, ['hydrating']);
+	});
+
+	test('shows the sessions of all worktree folders or of the one selected, until All Worktrees or reset, and all where the selected or a stored hidden folder is not offered', () => {
+		const inFolder = (id: string, path: string, repository?: { readonly uri: string; readonly workTree?: string }): ISession => {
+			const root = URI.file(path);
+			const workspace: ISessionWorkspace = {
+				uri: root, label: id, icon: Codicon.folder, requiresWorkspaceTrust: false, isVirtualWorkspace: false,
+				folders: [{
+					root, workingDirectory: root, name: id, description: undefined,
+					gitRepository: repository && { uri: URI.file(repository.uri), workTreeUri: repository.workTree ? URI.file(repository.workTree) : undefined, baseBranchName: undefined, gitHubInfo: constObservable(undefined) },
+				}],
+			};
+			return { ...buildTestSession({ id, title: id }).session, workspace: constObservable(workspace) };
+		};
+		const main = inFolder('main', '/work/vscode', { uri: '/work/vscode' });
+		const first = inFolder('first', '/work/vscode.worktrees/first', { uri: '/work/vscode', workTree: '/work/vscode.worktrees/first' });
+		const second = inFolder('second', '/work/vscode.worktrees/second');
+		// Quick chats never hide
+		const quick = buildTestSession({ id: 'quick', title: 'Quick', isQuickChat: true }).session;
+		const storage = store.add(new InMemoryStorageService());
+		const filters = createFilters(storage);
+		const keyOf = (label: string) => getSessionFilterOptions([main, first, second], [], listAll).find(option => option.filter.kind === 'worktree' && option.label === label)!.filter.id;
+		const state = (sessions: readonly ISession[], target = filters) => {
+			const available = getWorktreeFilterKeys(sessions, listAll);
+			const options = getSessionFilterOptions(sessions, [], listAll).filter(option => option.filter.kind === 'worktree');
+			const selected = target.getSelectedWorktree(available);
+			return {
+				checked: selected === undefined ? 'All Worktrees' : options.find(option => option.filter.id === selected)?.label,
+				visible: sessions.filter(session => target.matches(session, false, available)).map(session => session.sessionId),
+			};
+		};
+		const sessions = [main, first, second, quick];
+
+		const withoutWorktrees = getSessionFilterOptions([main, quick], [], listAll).filter(option => option.filter.kind === 'worktree').map(option => option.label);
+		const offered = getSessionFilterOptions(sessions, [], listAll).filter(option => option.filter.kind === 'worktree').map(option => option.label);
+		const initial = state(sessions);
+		filters.setSelectedWorktree(keyOf('first'));
+		const firstOnly = state(sessions);
+		const restored = state(sessions, createFilters(storage));
+		filters.setSelectedWorktree(keyOf('second'));
+		const secondOnly = state(sessions);
+		filters.setSelectedWorktree(undefined);
+		const all = state(sessions);
+		filters.setSelectedWorktree(keyOf('first'));
+		filters.reset();
+		const reset = state(sessions);
+		filters.setSelectedWorktree(keyOf('second'));
+		// Its last session goes: the folder is no longer offered, and all folders show again
+		const stale = state([main, first, quick]);
+		// Earlier builds stored hidden folders with the other filters
+		const legacyStorage = store.add(new InMemoryStorageService());
+		legacyStorage.store('sessionsListControl.filters', JSON.stringify([[sessionFilterKey({ kind: 'worktree', id: keyOf('first') }), true]]), StorageScope.PROFILE, StorageTarget.USER);
+		const legacy = state(sessions, createFilters(legacyStorage));
+
+		const everything = { checked: 'All Worktrees', visible: ['main', 'first', 'second', 'quick'] };
+		assert.deepStrictEqual({ withoutWorktrees, offered, initial, firstOnly, restored, secondOnly, all, reset, stale, legacy }, {
+			withoutWorktrees: [],
+			offered: ['vscode', 'first', 'second'],
+			initial: everything,
+			firstOnly: { checked: 'first', visible: ['first', 'quick'] },
+			restored: { checked: 'first', visible: ['first', 'quick'] },
+			secondOnly: { checked: 'second', visible: ['second', 'quick'] },
+			all: everything,
+			reset: everything,
+			stale: { checked: 'All Worktrees', visible: ['main', 'first', 'quick'] },
+			legacy: everything,
+		});
+	});
 
 	test('scheduled-only filtering persists and participates in reset and undo', () => {
 		const storage = store.add(new InMemoryStorageService());
@@ -394,5 +624,29 @@ suite('SessionsListFilters', () => {
 			{ id: 'third-party-client', label: 'Third Party' },
 			{ id: 'custom_client', label: 'Custom Client Brand' },
 		]);
+	});
+
+	test('lists quick chats in the Agents window, and in an editor window only while it has no folder, following its folders', () => {
+		const folders: URI[] = [];
+		const onDidChangeWorkspaceFolders = store.add(new Emitter<IWorkspaceFoldersChangeEvent>());
+		const workspace = upcastPartial<IWorkspaceContextService>({
+			onDidChangeWorkspaceFolders: onDidChangeWorkspaceFolders.event,
+			getWorkspace: () => upcastPartial<IWorkspace>({ folders: folders.map(uri => upcastPartial<IWorkspaceFolder>({ uri })) }),
+		});
+		const changeFolders = (change: () => void) => { change(); onDidChangeWorkspaceFolders.fire({ added: [], removed: [], changed: [] }); };
+		const editorWindow = listsQuickChatsIn(false, workspace);
+		const agentsWindow = listsQuickChatsIn(true, workspace);
+		const seen: boolean[] = [];
+		store.add(autorun(reader => { seen.push(editorWindow.read(reader)); }));
+
+		changeFolders(() => folders.push(URI.file('/work/vscode')));
+		const withFolder = { editorWindow: editorWindow.get(), agentsWindow: agentsWindow.get() };
+		changeFolders(() => folders.pop());
+
+		assert.deepStrictEqual({ seen, withFolder }, {
+			// Empty, a folder added, the last folder removed
+			seen: [true, false, true],
+			withFolder: { editorWindow: false, agentsWindow: true },
+		});
 	});
 });
