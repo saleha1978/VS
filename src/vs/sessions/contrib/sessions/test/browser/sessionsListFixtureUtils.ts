@@ -1278,6 +1278,7 @@ export async function renderSessionsViewFixture(context: ComponentFixtureContext
 		override readonly items = constObservable([]);
 		override readonly claimedDraftIds = constObservable(new Set<string>());
 	}());
+	instantiationService.stub(ISessionsViewLocator, new SessionsViewLocator());
 
 	// The Primary Side Bar of an editor window, whose single view shows the actions of its header in its title
 	container.classList.add('monaco-workbench');

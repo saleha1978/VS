@@ -9,11 +9,23 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { SESSIONS_LIST_INDENT_ITEMS_SETTING, SESSIONS_LIST_SHOW_ARCHIVED_BY_DEFAULT_SETTING, SESSIONS_LIST_SHOW_EMPTY_DEFAULT_GROUPS_SETTING, SESSIONS_LIST_SHOW_UNREAD_IN_COLLAPSED_SECTIONS_SETTING } from './views/sessionsList.js';
 import { SESSIONS_MARK_AS_DONE_CONFETTI_SETTING } from '../../../../platform/chat/common/sessionArchiveActions.js';
-import { AutomationSessionsListMode, ExternalSessionApplicationBadgeMode, SESSIONS_LIST_EXTERNAL_APPLICATION_BADGE_SETTING, SESSIONS_LIST_EXTERNAL_APPLICATION_BADGE_SHOW_FROM_SETTING, SESSIONS_LIST_GROUP_EXTERNAL_SESSIONS_SETTING, SESSIONS_LIST_INBOX_ENABLED_SETTING, SESSIONS_LIST_SHOW_AUTOMATION_SESSIONS_SETTING, USE_WORKTREE_SETTING } from '../common/sessionConfig.js';
+import { AutomationSessionsListMode, ExternalSessionApplicationBadgeMode, SESSIONS_LIST_EXTERNAL_APPLICATION_BADGE_SETTING, SESSIONS_LIST_EXTERNAL_APPLICATION_BADGE_SHOW_FROM_SETTING, SESSIONS_LIST_GROUP_EXTERNAL_SESSIONS_SETTING, SESSIONS_LIST_INBOX_ENABLED_SETTING, SESSIONS_LIST_SHOW_AUTOMATION_SESSIONS_SETTING, USE_WORKTREE_SETTING, SESSIONS_CHAT_TABS_DEFAULT, SESSIONS_CHAT_TABS_SETTING, SessionsChatTabsMode } from '../common/sessionConfig.js';
 import { IStringDictionary } from '../../../../base/common/collections.js';
 
 /** The settings of the sessions list and of the sessions it opens. */
 export const sessionsListConfigurationProperties = {
+	[SESSIONS_CHAT_TABS_SETTING]: {
+		type: 'string',
+		tags: ['preview'],
+		enum: [SessionsChatTabsMode.Multiple, SessionsChatTabsMode.Single],
+		enumDescriptions: [
+			localize('sessions.showChatTabs.multiple', "Each chat shows as a tab."),
+			localize('sessions.showChatTabs.single', "Only the active chat shows, with its title."),
+		],
+		description: localize('sessions.showChatTabs', "Controls whether chats show as tabs or as a single chat with its title."),
+		default: SESSIONS_CHAT_TABS_DEFAULT,
+		experiment: { mode: 'auto' },
+	},
 	[SESSIONS_LIST_GROUP_EXTERNAL_SESSIONS_SETTING]: {
 		type: 'boolean',
 		tags: ['preview'],

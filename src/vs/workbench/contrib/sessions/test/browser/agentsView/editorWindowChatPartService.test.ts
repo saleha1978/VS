@@ -11,8 +11,12 @@ import { constObservable, IObservable, observableValue } from '../../../../../..
 import { upcastPartial } from '../../../../../../base/test/common/mock.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../../base/test/common/utils.js';
 import { CommandsRegistry } from '../../../../../../platform/commands/common/commands.js';
+import { ChatPartEnabledContext } from '../../../../../common/contextkeys.js';
 import { ContextKeyValue, IContextKey, IContextKeyService } from '../../../../../../platform/contextkey/common/contextkey.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../../../platform/instantiation/common/instantiation.js';
+import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../../../platform/configuration/common/configurationRegistry.js';
+import { Registry } from '../../../../../../platform/registry/common/platform.js';
+import { registerSessionsListConfiguration } from '../../../browser/sessionsConfiguration.js';
 import { IWorkbenchLayoutService, Parts } from '../../../../../services/layout/browser/layoutService.js';
 import { ILifecycleService } from '../../../../../services/lifecycle/common/lifecycle.js';
 import { IChatViewHostService } from '../../../../chat/browser/chatViewHost.js';
@@ -26,7 +30,6 @@ import { TestStorageService } from '../../../../../test/common/workbenchTestServ
 import { AgentsChatViewHost } from '../../../browser/agentsView/agentsChatViewHost.js';
 import { IEditorWindowSessionsPresenterService } from '../../../browser/editorWindow/editorWindowSessionsPresenter.js';
 import { IEditorWindowSessionsRuntime } from '../../../browser/editorWindow/editorWindowSessionsRuntime.js';
-import { Registry } from '../../../../../../platform/registry/common/platform.js';
 import { TestInstantiationService } from '../../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { EditorExtensions, IEditorFactoryRegistry } from '../../../../../common/editor.js';
 import { EditorInput } from '../../../../../common/editor/editorInput.js';
@@ -50,6 +53,7 @@ suite('EditorWindowChatPartService', () => {
 	function createService(state: { visible: boolean }, frame?: IAgentsChatPartFrame) {
 		const events: string[] = [];
 		const ownsNewChat: IObservable<boolean>[] = [];
+		const keys: Record<string, unknown> = {};
 		const layoutService = upcastPartial<IWorkbenchLayoutService>({
 			setChatPartAnchor: anchor => events.push(`anchor ${anchor?.viewId}`),
 			onDidChangePartVisibility: Event.None,
@@ -62,7 +66,7 @@ suite('EditorWindowChatPartService', () => {
 			},
 		});
 		const contextKeyService = upcastPartial<IContextKeyService>({
-			createKey: <T extends ContextKeyValue>() => upcastPartial<IContextKey<T>>({ set: () => { }, reset: () => { } }),
+			createKey: <T extends ContextKeyValue>(key: string) => upcastPartial<IContextKey<T>>({ set: value => { keys[key] = value; }, reset: () => { delete keys[key]; } }),
 			contextMatchesRules: () => true,
 		});
 		const chatPart = upcastPartial<IAgentsChatPartService>({ restore: async () => { events.push('restore'); } });
@@ -89,7 +93,7 @@ suite('EditorWindowChatPartService', () => {
 			upcastPartial<IEditorWindowSessionsRuntime>({ enable: () => { events.push('hold providers'); return toDisposable(() => events.push('release providers')); } }),
 			frame ?? upcastPartial<IAgentsChatPartFrame>({ get part() { events.push('create part'); return undefined!; }, contentCreated: constObservable(false) }),
 		));
-		return { service, events, ownsNewChat };
+		return { service, events, ownsNewChat, keys };
 	}
 
 	test('does nothing until a feature enables it; features share the chat part, which docks beside the anchor of the highest priority', async () => {
@@ -141,6 +145,41 @@ suite('EditorWindowChatPartService', () => {
 			'unregister host', 'deactivate host', 'unregister presenter',
 			'anchor undefined', 'release providers', 'unregister composer holder',
 		]);
+	});
+
+	test('its enabled key follows whether a feature enables it now, also after it was on earlier', async () => {
+		const enabled = observableValue('enabled', false);
+		const { service, keys } = createService({ visible: false });
+		disposables.add(service.enable({ anchorViewId: 'chat', anchorPriority: 1, enabled }));
+		await timeout(0);
+		const states: boolean[] = [];
+		const record = () => states.push(keys[ChatPartEnabledContext.key] as boolean);
+		record();
+		enabled.set(true, undefined);
+		record();
+		enabled.set(false, undefined);
+		record();
+		enabled.set(true, undefined);
+		record();
+
+		assert.deepStrictEqual(states, [false, true, false, true]);
+	});
+
+	test('registers the setting that its header sets while chats open in it, alone or with the sessions list, which registers it too', () => {
+		const registry = Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration);
+		const registered = () => registry.getConfigurations().some(node => node.id === 'sessionsList');
+		const { service } = createService({ visible: false });
+		const steps = [registered()];
+
+		const chatPart = service.enable({ anchorViewId: 'chat', anchorPriority: 1, enabled: constObservable(true) });
+		steps.push(registered());
+		const list = registerSessionsListConfiguration();
+		chatPart.dispose();
+		steps.push(registered());
+		list.dispose();
+		steps.push(registered());
+
+		assert.deepStrictEqual(steps, [false, true, true, false]);
 	});
 
 	test('resolving it creates no part, also once its delayed frame is created, as at idle, after the workbench created its grid: enabling it does, as the window starts', async () => {

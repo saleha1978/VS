@@ -1863,6 +1863,7 @@ export class AgentHostSessionConfigPickerContribution extends Disposable impleme
 	private readonly _repositoryMenuItems = this._register(new DisposableStore());
 	private readonly _repositoryPropertyRegistrations = this._register(new DisposableMap<string>());
 	private readonly _providerListeners = this._register(new DisposableMap<string>());
+	private readonly _actionViewItemService: IActionViewItemService;
 
 	constructor(
 		@IActionViewItemService actionViewItemService: IActionViewItemService,
@@ -1875,6 +1876,7 @@ export class AgentHostSessionConfigPickerContribution extends Disposable impleme
 		@IChatViewFactory private readonly _chatViewFactory: IChatViewFactory,
 	) {
 		super();
+		this._actionViewItemService = actionViewItemService;
 		// The mode-picker factories below pick the mobile subclass at
 		// view-item construction time when the viewport is phone, and
 		// the desktop class otherwise. The session-config picker
@@ -1988,6 +1990,16 @@ export class AgentHostSessionConfigPickerContribution extends Disposable impleme
 		}
 	}
 
+	/** Shows the repository controls again, after what {@link showsRepositoryProperty} depends on changed. */
+	protected refreshRepositoryProperties(): void {
+		this._refreshRepositoryMenuItems(this._actionViewItemService);
+	}
+
+	/** Whether a repository control shows: here, all of them. */
+	protected showsRepositoryProperty(_isIsolation: boolean, _isNewSession: boolean): boolean {
+		return true;
+	}
+
 	private _readShownSessions(reader: IReader | undefined): readonly { readonly session: ISession; readonly chat: URI }[] {
 		const shown = new Map<string, { readonly session: ISession; readonly chat: URI }>();
 		const add = (session: ISession | undefined, chat: IChat | undefined) => {
@@ -2022,6 +2034,7 @@ export class AgentHostSessionConfigPickerContribution extends Disposable impleme
 				isPhoneLayout(this._layoutService),
 			).filter(([property, schema]) =>
 				isRenderableSessionConfigProperty(property, schema, config.schema, isNewSession) &&
+				this.showsRepositoryProperty(property === workspace.isolation?.key, isNewSession) &&
 				(isNewSession || schema.sessionMutable || property === workspace.isolation?.key || property === workspace.baseBranch?.key)
 			);
 			const branchIndex = properties.findIndex(([property]) => property === workspace.baseBranch?.key);

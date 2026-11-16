@@ -52,6 +52,13 @@ suite('EditorWindowSessionsList', () => {
 		});
 	});
 
+	test('every editor window view offers every grouping, also Worktree, with no fixed default', () => {
+		const options = createEditorWindowSessionsViewOptions({ id: SessionsViewId } as IViewletViewOptions, observableValue('scoped', true));
+		assert.deepStrictEqual(options.groupings, {
+			offered: [SessionsGrouping.Workspace, SessionsGrouping.Repository, SessionsGrouping.Environment, SessionsGrouping.Date, SessionsGrouping.Inbox, SessionsGrouping.Worktree],
+		});
+	});
+
 	test('only the header presentation differs between title and section', () => {
 		const scoped = observableValue('scoped', true);
 		const title = createEditorWindowSessionsViewOptions({ id: SessionsViewId } as IViewletViewOptions, scoped, 'title');
@@ -62,18 +69,21 @@ suite('EditorWindowSessionsList', () => {
 
 	test('registers the Sessions view and the setup view in the container', () => {
 		const container = { id: 'test.editorWindowSessionsList', title: localize2Value('Chat'), icon: undefined } as unknown as IViewContainerDescriptor;
-		const registry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);
-		// Another suite may have registered the Agents window's own Sessions view, as ids are registered once
-		const existing = registry.getView(SessionsViewId);
-		const existingContainer = registry.getViewContainer(SessionsViewId);
-		if (existing && existingContainer) {
-			registry.deregisterViews([existing], existingContainer);
+		const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);
+		// A contribution of the window may already have registered these views elsewhere
+		const restores: (() => void)[] = [];
+		for (const id of [SessionsViewId, AGENTS_VIEW_SETUP_VIEW_ID]) {
+			const existing = viewsRegistry.getView(id);
+			const existingContainer = viewsRegistry.getViewContainer(id);
+			if (existing && existingContainer) {
+				viewsRegistry.deregisterViews([existing], existingContainer);
+				restores.push(() => viewsRegistry.registerViews([existing], existingContainer));
+			}
 		}
 		store.add(registerEditorWindowSessionsViews(container, observableValue('scoped', false)));
-		if (existing && existingContainer) {
-			store.add(toDisposable(() => registry.registerViews([existing], existingContainer)));
-		}
-		const views = registry.getViews(container).map(view => ({ id: view.id, when: view.when?.serialize() }));
+		// Disposed after the registration above
+		store.add(toDisposable(() => restores.forEach(restore => restore())));
+		const views = viewsRegistry.getViews(container).map(view => ({ id: view.id, when: view.when?.serialize() }));
 		assert.deepStrictEqual(views, [
 			{ id: SessionsViewId, when: AgentsViewWhen.serialize() },
 			{ id: AGENTS_VIEW_SETUP_VIEW_ID, when: ContextKeyExpr.and(AgentsViewAvailable, AgentsViewNeedsSetup)?.serialize() },

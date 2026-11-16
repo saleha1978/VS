@@ -3285,6 +3285,16 @@ export abstract class Workbench extends Disposable implements IAgentWorkbenchLay
 		return this.workbenchGrid.isViewMaximized(this.panelPartView);
 	}
 
+	hasChatPart(): boolean {
+		return false;
+	}
+
+	isEditorHiddenByChat(): boolean {
+		return false;
+	}
+
+	setEditorHiddenByChat(_hidden: boolean): void { }
+
 	toggleMaximizedAuxiliaryBar(): void {
 		// No-op: Maximize not supported in this layout
 	}

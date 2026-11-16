@@ -25,7 +25,7 @@ import { ContextKeyExpr, ContextKeyExpression, IContextKeyChangeEvent, IContextK
 import { autorun, IObservable } from '../../../../../../base/common/observable.js';
 import { MockContextKeyService } from '../../../../../../platform/keybinding/test/common/mockKeybindingService.js';
 import { KeybindingsRegistry } from '../../../../../../platform/keybinding/common/keybindingsRegistry.js';
-import { IWorkspace, IWorkspaceContextService } from '../../../../../../platform/workspace/common/workspace.js';
+import { IWorkspaceContextService } from '../../../../../../platform/workspace/common/workspace.js';
 import { CHAT_OPEN_ACTION_ID } from '../../../../chat/browser/actions/chatActions.js';
 import { ChatContextKeys } from '../../../../chat/common/actions/chatContextKeys.js';
 import { ChatConfiguration, OPEN_AGENTS_WINDOW_COMMAND_ID, OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID, surfacesAllLocalAgentHostAgents } from '../../../../chat/common/constants.js';
@@ -34,10 +34,8 @@ import { AgentsViewGate } from '../../../browser/agentsView/agentsViewGate.js';
 import { IEditorWindowChatPartService } from '../../../browser/agentsView/agentsChatPartContribution.js';
 import { IEditorWindowSessionsRuntime } from '../../../browser/editorWindow/editorWindowSessionsRuntime.js';
 import { Menus } from '../../../browser/menus.js';
-import { SessionGroupToolbarMenuId, SessionItemContextMenuId, SessionSectionToolbarMenuId, SessionsGrouping } from '../../../browser/views/sessionsList.js';
-import { bindSessionsViewGroupings, getStoredSessionsGrouping, ISessionsViewOptions, SessionsView, SessionsViewId } from '../../../browser/views/sessionsView.js';
-import { InMemoryStorageService, StorageScope } from '../../../../../../platform/storage/common/storage.js';
-import { IsSessionsWindowContext } from '../../../../../common/contextkeys.js';
+import { SessionGroupToolbarMenuId, SessionItemContextMenuId, SessionSectionToolbarMenuId } from '../../../browser/views/sessionsList.js';
+import { SessionsViewId } from '../../../browser/views/sessionsView.js';
 import { DeferredPromise, timeout } from '../../../../../../base/common/async.js';
 import { runWithFakedTimers } from '../../../../../../base/test/common/virtualScheduling/index.js';
 import { IExtensionService } from '../../../../../services/extensions/common/extensions.js';
@@ -219,6 +217,17 @@ suite('AgentsViewGate', () => {
 		assert.deepStrictEqual({ afterShown, afterDispose: sessionItemMenuItems() - before }, { afterShown: true, afterDispose: 0 });
 	});
 
+	test('disposed, it deregisters its views while their container is still registered, so the view descriptors service resets their context keys', () => {
+		const gate = createGate(true);
+		const containerRegistered = () => !!Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).get(AGENTS_VIEW_CONTAINER_ID);
+		const containerRegisteredAtViewsDeregistered: boolean[] = [];
+		disposables.add(Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).onViewsDeregistered(() => containerRegisteredAtViewsDeregistered.push(containerRegistered())));
+
+		gate.dispose();
+
+		assert.deepStrictEqual({ containerRegisteredAtViewsDeregistered, containerRegistered: containerRegistered() }, { containerRegisteredAtViewsDeregistered: [true], containerRegistered: false });
+	});
+
 	test('registers the accessibility help of the Sessions view and of its Undo notice as the window starts, before the view shows, as help registered later would not be installed', () => {
 		const helps = () => AccessibleViewRegistry.getImplementations().map(help => help.name).filter(name => name === 'sessions-view' || name === 'sessions-list-notification').sort();
 		// The Agents window's list, which other tests load, holds the Undo notice's help for good
@@ -345,56 +354,6 @@ suite('AgentsViewGate', () => {
 			signedOut: [AGENTS_VIEW_SETUP_VIEW_ID],
 			notInstalled: [AGENTS_VIEW_SETUP_VIEW_ID],
 			anonymous: [SessionsViewId],
-		});
-	});
-
-	test('its Sessions view offers every grouping, also Worktree, which the Agents window does not: it shows Inbox or Workspace until one is chosen, sets Worktree and restores it', () => {
-		createGate(true);
-		showSessionsView();
-		const { container, view } = registered();
-
-		// The options with which the container the gate registers creates its Sessions view
-		let options: ISessionsViewOptions | undefined;
-		const paneContainer = Object.assign(Object.create(container!.ctorDescriptor.ctor.prototype), {
-			contextService: upcastPartial<IWorkspaceContextService>({ onDidChangeWorkspaceFolders: Event.None, getWorkspace: () => upcastPartial<IWorkspace>({ folders: [] }) }),
-			instantiationService: upcastPartial<IInstantiationService>({ createInstance: (_ctor: unknown, ...args: unknown[]) => { options = args.at(-1) as ISessionsViewOptions; return undefined; } }),
-		});
-		Reflect.apply(Reflect.get(paneContainer, 'createView'), paneContainer, [view, {}]);
-
-		// A Sessions view with those options, as it restores, shows and sets its grouping
-		const configurationService = new TestConfigurationService();
-		disposables.add(configurationService.onDidChangeConfigurationEmitter);
-		const storageService = disposables.add(new InMemoryStorageService());
-		const createSessionsView = () => ({
-			currentGrouping: getStoredSessionsGrouping(storageService.get('sessionsViewPane.grouping', StorageScope.PROFILE), options?.groupings?.offered ?? []),
-			groupings: options?.groupings,
-			configurationService,
-			storageService,
-			get grouping(): SessionsGrouping { return Reflect.get(SessionsView.prototype, 'grouping', this); },
-			get offeredGroupings(): readonly SessionsGrouping[] { return Reflect.get(SessionsView.prototype, 'offeredGroupings', this); },
-			updateHeaderLayout: () => { },
-		});
-		const sessionsView = createSessionsView();
-		const shown = sessionsView.grouping;
-
-		// Its Grouping menu, in an editor window
-		const viewContextKeys = new MockContextKeyService();
-		bindSessionsViewGroupings(viewContextKeys, sessionsView.offeredGroupings);
-		const values = new Map<string, unknown>([[ChatContextKeys.enabled.key, true], [IsSessionsWindowContext.key, false]]);
-		const menu = MenuRegistry.getMenuItems(Menus.SessionsViewGrouping).filter(isIMenuItem)
-			.filter(item => item.when?.evaluate({ getValue: <T>(key: string) => (values.has(key) ? values.get(key) : viewContextKeys.getContextKeyValue(key)) as T }) ?? true)
-			.map(item => item.command.id).sort();
-
-		(SessionsView.prototype.setGrouping as (this: typeof sessionsView, grouping: SessionsGrouping) => void).call(sessionsView, SessionsGrouping.Worktree);
-		const set = sessionsView.grouping;
-		const restored = createSessionsView().grouping;
-
-		assert.deepStrictEqual({ offered: [...sessionsView.offeredGroupings].sort(), menu, shown, set, restored }, {
-			offered: Object.values(SessionsGrouping).sort(),
-			menu: ['sessionsViewPane.groupByEnvironment', 'sessionsViewPane.groupByRepository', 'sessionsViewPane.groupByTime', 'sessionsViewPane.groupByWorkspace', 'sessionsViewPane.groupByWorktree', 'sessionsViewPane.inboxMode'],
-			shown: SessionsGrouping.Workspace,
-			set: SessionsGrouping.Worktree,
-			restored: SessionsGrouping.Worktree,
 		});
 	});
 
