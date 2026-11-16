@@ -66,7 +66,6 @@ import { remoteAgentHostSessionTypeAuthorityPrefix, remoteAgentHostSessionTypeId
 import { readAgentDevContainerWorktreeMetadata } from '../../../../../../platform/agentHost/common/meta/agentDevContainerWorktreeMeta.js';
 import { INewSessionComposerService } from '../../../browser/newSessionComposerService.js';
 import { getRemoteAgentHostPickerKey, RemoteAgentHostPickerVisibility } from './remoteAgentHostPickerVisibility.js';
-import { ENVIRONMENT_PICKER_MANAGE_REMOTES_SETTING } from '../../../common/chatConstants.js';
 
 /** Storage key prefix for cached session summaries, per remote address. */
 const CACHED_SESSIONS_STORAGE_PREFIX = 'remoteAgentHost.cachedSessions.v5.';
@@ -386,14 +385,11 @@ export class RemoteAgentHostSessionsProvider extends DevContainerAgentHostSessio
 		this.localRegistration = config.localRegistration;
 		const pickerVisibility = this._register(new RemoteAgentHostPickerVisibility(storageService));
 		const pickerKey = config.pickerVisibilityKey ?? getRemoteAgentHostPickerKey(config.preferenceKey ?? config.address);
-		const manageRemotes = observableConfigValue(ENVIRONMENT_PICKER_MANAGE_REMOTES_SETTING, true, this._configurationService);
 		this.isAvailableInEnvironmentPicker = config.isVisibleInEnvironmentPicker ?? constObservable(true);
 		this.isVisibleInEnvironmentPicker = derived(this, reader =>
-			(!manageRemotes.read(reader) || !pickerVisibility.isHidden(pickerKey, reader)) && this.isAvailableInEnvironmentPicker?.read(reader) !== false);
+			!pickerVisibility.isHidden(pickerKey, reader) && this.isAvailableInEnvironmentPicker?.read(reader) !== false);
 		this.showInEnvironmentPicker = () => {
-			if (manageRemotes.get()) {
-				pickerVisibility.setHidden(pickerKey, false);
-			}
+			pickerVisibility.setHidden(pickerKey, false);
 		};
 		this.removeLabel = config.removeLabel;
 		this.canRemove = config.canRemove;
@@ -984,6 +980,7 @@ export class RemoteAgentHostSessionsProvider extends DevContainerAgentHostSessio
 			return;
 		}
 		this._remoteAgentHostService.reconnect(this.remoteAddress);
+		await this._remoteAgentHostService.waitForConnection(this.remoteAddress);
 	}
 
 	reconnectNow(): void {
@@ -1172,6 +1169,7 @@ export class RemoteAgentHostSessionsProvider extends DevContainerAgentHostSessio
 			return;
 		}
 
+		this._sessionListVersion.set(0, undefined);
 		const wasUnpublished = this._unpublished;
 		this._connectionListeners.clear();
 		this._sessionStateSubscriptions.clearAndDisposeAll();
@@ -1213,6 +1211,7 @@ export class RemoteAgentHostSessionsProvider extends DevContainerAgentHostSessio
 	 * host is unreachable should follow up with {@link unpublishCachedSessions}.
 	 */
 	clearConnection(): void {
+		this._sessionListVersion.set(0, undefined);
 		this._devContainerIdleScheduler.cancel();
 		this._devContainerIdleSince = undefined;
 		this._connectionListeners.clear();
@@ -1280,6 +1279,8 @@ export class RemoteAgentHostSessionsProvider extends DevContainerAgentHostSessio
 	 * entries.
 	 */
 	unpublishCachedSessions(): void {
+		// Invalidate readiness before observers can sample the hidden list as an authoritative empty result.
+		this._sessionListVersion.set(0, undefined);
 		if (this._unpublished) {
 			return;
 		}
