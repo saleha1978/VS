@@ -10,6 +10,7 @@ import { getDefaultHoverDelegate } from '../../../../../../../base/browser/ui/ho
 import { renderLabelWithIcons } from '../../../../../../../base/browser/ui/iconLabel/iconLabels.js';
 import { IRadioOptionItem, Radio } from '../../../../../../../base/browser/ui/radio/radio.js';
 import { Action } from '../../../../../../../base/common/actions.js';
+import { equals } from '../../../../../../../base/common/arrays.js';
 import { Codicon } from '../../../../../../../base/common/codicons.js';
 import { IStringDictionary } from '../../../../../../../base/common/collections.js';
 import { onUnexpectedError } from '../../../../../../../base/common/errors.js';
@@ -159,6 +160,28 @@ function routingAlternativesEqual(a: readonly IModelCardRoutingAlternative[] | u
 			&& alternative.label === b[index].label && alternative.replacesTier === b[index].replacesTier && alternative.selectsTier === b[index].selectsTier);
 }
 
+/** The settings, choices, and model targets that must still match before a refresh can wait for selection motion. */
+function getControlBindings(options: IModelCardOptions): readonly (readonly unknown[])[] {
+	const configurationBindings = [MODEL_CONFIG_GROUP_EFFORT, MODEL_CONFIG_GROUP_CONTEXT].map(group => {
+		const property = getModelConfigProperty(options.model, options.configurationAccess, group, options.useModelConfigurationSchema);
+		return property ? [property.key, ...getModelConfigChoices(property).flatMap(choice => [choice.value, choice.readOnly])] : [];
+	});
+	const comparisonBindings = options.comparisonVariants ? [
+		[options.model.identifier],
+		...options.comparisonVariants.list.map(variant => [
+			variant.label,
+			...Object.keys(variant.configuration).sort().flatMap(key => [key, variant.configuration[key]]),
+		]),
+	] : [];
+	return [
+		...configurationBindings,
+		options.speedVariants ? [options.speedVariants.standard.identifier, options.speedVariants.fast.identifier] : [],
+		options.modelChoices?.choices.map(choice => choice.model.identifier) ?? [],
+		options.routingAlternatives?.flatMap(alternative => [alternative.model.identifier, alternative.replacesTier, alternative.selectsTier]) ?? [],
+		...comparisonBindings,
+	];
+}
+
 /**
  * Model information and configuration, shared by the picker's details page and fixtures.
  * Configuration changes are written through and preserve keyboard focus.
@@ -172,6 +195,25 @@ export class ModelCard extends DisposableStore {
 	private readonly _groupControls = new Map<string, Radio>();
 	private readonly _pricingDisclosureListener = this.add(new MutableDisposable());
 	private _configurationChangeVersion = 0;
+	/** Choices made here that are still saving, in the order they were made. */
+	private readonly _pendingEdits = new Set<{ readonly configurationAccess: IModelConfigurationAccess; readonly modelId: string; readonly values: IStringDictionary<unknown> }>();
+	/** Reads the saved configuration with those choices on top, so a rebuild before they save keeps showing them. */
+	private readonly _configurationReader: Pick<IModelConfigurationAccess, 'getModelConfiguration' | 'getModelConfigurationSchema'> = {
+		getModelConfiguration: modelId => {
+			const { configurationAccess } = this._options;
+			let values = configurationAccess.getModelConfiguration(modelId);
+			for (const edit of this._pendingEdits) {
+				if (edit.configurationAccess === configurationAccess && edit.modelId === modelId) {
+					values = { ...values, ...edit.values };
+				}
+			}
+			return values;
+		},
+		getModelConfigurationSchema: modelId => this._options.configurationAccess.getModelConfigurationSchema?.(modelId),
+	};
+	private _renderPending = false;
+	/** The settings and choices the current controls were rendered with. */
+	private _renderedBindings: readonly (readonly unknown[])[] = [];
 	private _headerActions: ActionBar | undefined;
 	private _routingBadge: HTMLElement | undefined;
 	/** The effort level the routing badge describes: the one shown as selected, which a click changes before it saves. */
@@ -219,7 +261,7 @@ export class ModelCard extends DisposableStore {
 	}
 
 	private _configProperty(group: string): IModelConfigProperty | undefined {
-		return getModelConfigProperty(this._options.model, this._options.configurationAccess, group, this._options.useModelConfigurationSchema);
+		return getModelConfigProperty(this._options.model, this._configurationReader, group, this._options.useModelConfigurationSchema);
 	}
 
 	private async _setValues(values: IStringDictionary<unknown>, focusedGroup?: string): Promise<void> {
@@ -235,8 +277,10 @@ export class ModelCard extends DisposableStore {
 				}
 			}
 		}
+		let saved = false;
 		try {
-			await setModelConfigValues(options.model, options.configurationAccess, values, options.onDidChangeConfiguration, options.useModelConfigurationSchema);
+			await this._saveValues(options, values);
+			saved = true;
 			if (!this.isDisposed && version === this._configurationChangeVersion) {
 				if (options.selectModelOnConfigurationChange !== false) {
 					options.onSelect?.(options.model);
@@ -245,7 +289,9 @@ export class ModelCard extends DisposableStore {
 			}
 			await Promise.all([...this._groupControls.values()].map(control => control.whenSelectionAnimationSettles()));
 		} finally {
-			if (!this.isDisposed && version === this._configurationChangeVersion) {
+			// A failed choice is taken back wherever the card still shows its model, even after a newer selection.
+			const showsEdit = this._options.model.identifier === options.model.identifier && this._options.configurationAccess === options.configurationAccess;
+			if (!this.isDisposed && (version === this._configurationChangeVersion || (!saved && showsEdit))) {
 				this._renderPreservingFocus(focusedGroup);
 			}
 		}
@@ -254,7 +300,27 @@ export class ModelCard extends DisposableStore {
 		}
 	}
 
+	private async _saveValues(options: IModelCardOptions, values: IStringDictionary<unknown>): Promise<void> {
+		const edit = { configurationAccess: options.configurationAccess, modelId: options.model.identifier, values };
+		this._pendingEdits.add(edit);
+		try {
+			await setModelConfigValues(options.model, options.configurationAccess, values, options.onDidChangeConfiguration, options.useModelConfigurationSchema);
+		} finally {
+			this._pendingEdits.delete(edit);
+		}
+	}
+
 	private _renderPreservingFocus(fallbackGroup?: string): void {
+		// Changed settings or model choices must stop accepting input before selection motion settles.
+		const controlsFit = equals(this._renderedBindings, getControlBindings(this._options), (a, b) => equals(a, b));
+		if (controlsFit && this._renderPending) {
+			return;
+		}
+		if (controlsFit && [...this._groupControls.values()].some(control => control.isSelectionAnimating)) {
+			this._renderPending = true;
+			this._renderAfterSelectionAnimation(fallbackGroup).catch(onUnexpectedError);
+			return;
+		}
 		const hadFocus = this.element.contains(dom.getActiveElement()) || this.headerElement.contains(dom.getActiveElement());
 		const focusedControl = [...this._groupControls].find(([, control]) => dom.isAncestorOfActiveElement(control.domNode));
 		const group = focusedControl?.[0] ?? fallbackGroup;
@@ -272,6 +338,18 @@ export class ModelCard extends DisposableStore {
 			this._headerActions?.focus(actionIndex);
 		} else {
 			this._restoreFocus(group, optionIndex);
+		}
+	}
+
+	/** Rebuilding the setting controls would cut their selection motion short, so a rebuild waits for it to settle. */
+	private async _renderAfterSelectionAnimation(fallbackGroup?: string): Promise<void> {
+		try {
+			await Promise.all([...this._groupControls.values()].map(control => control.whenSelectionAnimationSettles()));
+		} finally {
+			this._renderPending = false;
+		}
+		if (!this.isDisposed) {
+			this._renderPreservingFocus(fallbackGroup);
 		}
 	}
 
@@ -307,6 +385,7 @@ export class ModelCard extends DisposableStore {
 		this._routingBadge = undefined;
 		this._routingBadgeTier = undefined;
 		this._groupControls.clear();
+		this._renderedBindings = getControlBindings(this._options);
 
 		const { model, isUBB, openerService } = this._options;
 		const metadata = model.metadata;
@@ -398,7 +477,7 @@ export class ModelCard extends DisposableStore {
 			}
 		}
 
-		const changed = getChangedModelConfigProperties(this._options.model, this._options.configurationAccess, this._options.useModelConfigurationSchema);
+		const changed = getChangedModelConfigProperties(this._options.model, this._configurationReader, this._options.useModelConfigurationSchema);
 		if (!changed.length && !this._options.onTogglePin) {
 			return;
 		}
@@ -489,7 +568,6 @@ export class ModelCard extends DisposableStore {
 	 */
 	private _renderComparisonVariantsSection(effort: IModelConfigProperty, variants: IModelCardComparisonVariants): void {
 		const choices = getModelConfigChoices(effort);
-		const baseConfiguration = isComparisonConfigurationValue(effort.value) ? { [effort.key]: effort.value } : undefined;
 		const addable = choices.filter(choice => !choice.checked && !variants.list.some(variant => variant.configuration[effort.key] === choice.value));
 		if (!addable.length && !variants.list.length) {
 			return;
@@ -506,7 +584,14 @@ export class ModelCard extends DisposableStore {
 		for (const choice of addable) {
 			const chip = dom.append(chips, dom.$('button.chat-model-card-comparison-variant-chip.addable', { 'aria-label': localize('chat.modelPicker.addVariant', "Also compare at {0}", choice.label) }));
 			dom.reset(chip, ...renderLabelWithIcons(`$(${Codicon.add.id}) ${choice.label}`));
-			this._contentDisposables.add(dom.addDisposableListener(chip, dom.EventType.CLICK, () => variants.onAdd({ [effort.key]: choice.value }, choice.label, baseConfiguration)));
+			this._contentDisposables.add(dom.addDisposableListener(chip, dom.EventType.CLICK, () => {
+				const currentEffort = this._configProperty(MODEL_CONFIG_GROUP_EFFORT);
+				if (!currentEffort || choice.value === currentEffort.value) {
+					return;
+				}
+				const baseConfiguration = isComparisonConfigurationValue(currentEffort.value) ? { [currentEffort.key]: currentEffort.value } : undefined;
+				variants.onAdd({ [currentEffort.key]: choice.value }, choice.label, baseConfiguration);
+			}));
 		}
 	}
 
