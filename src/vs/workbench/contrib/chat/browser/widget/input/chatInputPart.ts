@@ -381,6 +381,8 @@ export interface IChatInputPartOptions {
 	 * When true, the secondary toolbar (permissions picker) is hidden.
 	 */
 	isSessionsWindow?: boolean;
+	/** Whether it shows its session's working set also while {@link isSessionsWindow} is set; never in the Agents window. */
+	sessionWorkingSet?: boolean;
 	/**
 	 * Total horizontal gutter (in pixels) reserved outside the input box when
 	 * computing the editor width. Defaults account for the `.interactive-input-part`
@@ -423,6 +425,11 @@ export interface IChatInputHostSubmit {
 	readonly hasContent?: IObservable<boolean>;
 	/** Label shown on the submit button, for sends that do more than send one request. */
 	readonly label?: IObservable<string | undefined>;
+	/**
+	 * Called as the input submits to the host, before it saves the dirty files it saves before sending and calls the
+	 * host's `submitHandler`; the returned disposable is disposed as that submit ends, also when it fails.
+	 */
+	beginSubmit?(): IDisposable;
 }
 
 export interface IWorkingSetEntry {
@@ -5524,6 +5531,14 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		});
 	}
 
+	/**
+	 * The files the session working set shows: the registered session file changes, without those the input kept itself,
+	 * such as for a host without Accept Changes. None while the working set doesn't show.
+	 */
+	get sessionWorkingSetDiffs(): IObservable<readonly IEditSessionEntryDiff[]> {
+		return this._sessionWorkingSetDiffs;
+	}
+
 	get hasSessionWorkingSet(): boolean {
 		return !!this._sessionWorkingSetView.value;
 	}
@@ -5543,10 +5558,11 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 
 	/**
 	 * Whether this input can show the session working set. Only the editor
-	 * window offers it; the Agents window doesn't, even in a chat editor.
+	 * window offers it, also to a session's chat that asks for it; the Agents
+	 * window doesn't, even in a chat editor.
 	 */
 	get supportsSessionWorkingSet(): boolean {
-		return this.options.renderWorkingSet && !this.options.isSessionsWindow && !this.environmentService.isSessionsWindow;
+		return (this.options.sessionWorkingSet || (this.options.renderWorkingSet && !this.options.isSessionsWindow)) && !this.environmentService.isSessionsWindow;
 	}
 
 	renderChatEditingSessionState(chatEditingSession: IChatEditingSession | null) {

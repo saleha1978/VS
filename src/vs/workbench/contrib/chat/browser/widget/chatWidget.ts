@@ -362,6 +362,8 @@ export class ChatWidget extends Disposable implements IChatWidget {
 	private _onDidFocus = this._register(new Emitter<void>());
 	readonly onDidFocus = this._onDidFocus.event;
 
+	/** Whether it sets the model of the session its first request made, which its view model change reports. */
+	private _settingCommittedModel = false;
 	private _onDidChangeViewModel = this._register(new Emitter<IChatWidgetViewModelChangeEvent>());
 	readonly onDidChangeViewModel = this._onDidChangeViewModel.event;
 	private readonly _onDidChangeDraft = this._register(new Emitter<void>());
@@ -498,6 +500,9 @@ export class ChatWidget extends Disposable implements IChatWidget {
 	/** Whether renderer options changed since the list rows were last rerendered. */
 	private _listRowsStale = false;
 	private readonly _draftOnly = observableValue(this, false);
+	private readonly _inputVisibleObs = observableValue(this, true);
+	/** Whether its input shows: not while the chat is read-only without it (see {@link setInputVisible}). */
+	readonly inputVisible: IObservable<boolean> = this._inputVisibleObs;
 
 	private _instructionFilesCheckPromise: Promise<boolean> | undefined;
 	private _instructionFilesExist: boolean | undefined;
@@ -579,7 +584,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 			this.logService.debug('ChatWidget#setViewModel: no viewModel');
 		}
 
-		this._onDidChangeViewModel.fire({ previousSessionResource, currentSessionResource: this._viewModel?.sessionResource });
+		this._onDidChangeViewModel.fire({ previousSessionResource, currentSessionResource: this._viewModel?.sessionResource, committed: this._settingCommittedModel || undefined });
 		this.updateSessionStateIndicator();
 	}
 
@@ -2407,6 +2412,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 	setInputVisible(visible: boolean): void {
 		const changed = this._inputVisible !== visible;
 		this._inputVisible = visible;
+		this._inputVisibleObs.set(visible, undefined);
 		// Re-applied in `createInput` so a rebuilt input part keeps the correct visibility.
 		this._applyInputVisibility();
 		if (changed && this.bodyDimension) {
@@ -2958,6 +2964,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 			defaultMode: this.viewOptions.defaultMode,
 			sessionTypePickerDelegate: this.viewOptions.sessionTypePickerDelegate,
 			isSessionsWindow: this.viewOptions.isSessionsWindow,
+			sessionWorkingSet: this.viewOptions.sessionWorkingSet,
 			inputPartHorizontalPadding: this.viewOptions.inputPartHorizontalPadding,
 			hostModelSelection: this.viewOptions.hostModelSelection,
 			deferredNotificationsEnabled: this.viewOptions.deferredNotificationsEnabled,
@@ -3255,6 +3262,16 @@ export class ChatWidget extends Disposable implements IChatWidget {
 
 	private _applyListPaddingBottom(): void {
 		this.listWidget?.setPaddingBottom(this._getListPaddingBottom());
+	}
+
+	/** Shows the session that its first request made of the one it shows, such as an untitled chat's committed session. */
+	private setCommittedModel(model: IChatModel): void {
+		this._settingCommittedModel = true;
+		try {
+			this.setModel(model);
+		} finally {
+			this._settingCommittedModel = false;
+		}
 	}
 
 	setModel(model: IChatModel | undefined): void {
@@ -4034,6 +4051,8 @@ export class ChatWidget extends Disposable implements IChatWidget {
 				return;
 			}
 			this._submitHandlerInFlight = true;
+			// The host's submit begins before the files save, which can take a while, such as with save participants
+			const hostSubmit = this.viewOptions.hostSubmit?.beginSubmit?.();
 			try {
 				const inputValue = !query ? this.getInput() : query.query;
 				await saveAllBeforeChatSend(this.configurationService, this.editorService);
@@ -4047,6 +4066,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 					return;
 				}
 			} finally {
+				hostSubmit?.dispose();
 				this._submitHandlerInFlight = false;
 			}
 		}
@@ -4305,7 +4325,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 			if (result.newSessionResource) {
 				const newModel = this.chatService.getSession(result.newSessionResource);
 				if (newModel) {
-					this.setModel(newModel);
+					this.setCommittedModel(newModel);
 				}
 			}
 			return;
@@ -4359,7 +4379,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 		if (sent.newSessionResource) {
 			const newModel = this.chatService.getSession(sent.newSessionResource);
 			if (newModel) {
-				this.setModel(newModel);
+				this.setCommittedModel(newModel);
 			}
 		}
 
