@@ -340,6 +340,8 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 					canSubmit: derived(this, reader => this._canSendRequest.read(reader) && !this._sending.read(reader)),
 					hasContent: this.options.hasAdditionalSendContent,
 					label: this.options.sendButtonLabel,
+					// Submitting from the user's submit on, also while the widget saves files first, so its host doesn't retarget it
+					beginSubmit: () => this.options.inputSnapshot?.beginSubmit() ?? Disposable.None,
 				},
 				submitHandler: async (query, _mode, attachedContext) => {
 					await this._send(query, attachedContext ?? [], false);
@@ -1078,7 +1080,17 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 		}
 	}
 
+	/** Sends the input, marked as submitting from here on, before any check or wait, so its host doesn't retarget it meanwhile. */
 	private async _send(rawQuery: string, attachments: readonly IChatRequestVariableEntry[], background: boolean): Promise<boolean> {
+		const submitting = this.options.inputSnapshot?.beginSubmit();
+		try {
+			return await this._doSend(rawQuery, attachments, background);
+		} finally {
+			submitting?.dispose();
+		}
+	}
+
+	private async _doSend(rawQuery: string, attachments: readonly IChatRequestVariableEntry[], background: boolean): Promise<boolean> {
 		const widget = this._widget;
 		const query = rawQuery.trim();
 		const hasAdditionalSendContent = this.options.hasAdditionalSendContent?.get() ?? false;
