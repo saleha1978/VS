@@ -4370,6 +4370,7 @@ suite('AgentService (node dispatcher)', () => {
 		gitService.getRepositoryRoot = async () => workingDirectory;
 		gitService.revParse = async () => 'head';
 		gitService.getCurrentBranch = async () => 'feature';
+		gitService.getCurrentBranchName = async () => 'feature';
 		gitService.getHEAD = async () => ({ ref: 'refs/heads/feature', name: 'feature', kind: GitRefType.Head });
 		gitService.getDefaultBranch = async () => ({ name: 'main', startPoint: 'origin/main' });
 		gitService.getDefaultBranch2 = async () => ({
@@ -4472,8 +4473,19 @@ suite('AgentService (node dispatcher)', () => {
 			workingDirectory,
 			property: SessionConfigKey.Branch,
 		});
+		let sourceRequests = 0;
+		gitService.getBranchCreationSources = async () => { sourceRequests++; return []; };
+		const sourceResults = [];
+		for (const metadata of [undefined, { 'vscode.branchCreationSources': 'true' }, { 'unknown.branchCreationSources': true }, { 'vscode.branchCreationSources': true }]) {
+			const result = await localService.sessionConfigCompletions({
+				provider: 'codex', workingDirectory, property: SessionConfigKey.Branch, _meta: metadata,
+			});
+			sourceResults.push(result.items.map(item => item.value));
+		}
 
 		assert.deepStrictEqual({
+			sourceRequests,
+			sourceResults,
 			providerResolveConfigs,
 			providerCompletionConfigs,
 			branchesWithQuery: branchesWithQuery.items,
@@ -4501,6 +4513,8 @@ suite('AgentService (node dispatcher)', () => {
 				providerSetting: folder.values.providerSetting,
 			},
 		}, {
+			sourceRequests: 1,
+			sourceResults: [['feature', 'main'], ['feature', 'main'], ['feature', 'main'], []],
 			providerResolveConfigs: [
 				{ providerSetting: 'initial' },
 				{ providerSetting: 'selected' },
@@ -23797,6 +23811,7 @@ suite('AgentService (node dispatcher)', () => {
 				getBranch: async () => undefined,
 				getRefs: async () => [],
 				getBranches: async () => [],
+				getBranchCreationSources: async () => [],
 				getRepositoryRoot: async () => undefined,
 				getWorktreeRoots: async () => [],
 				getWorktrees: async () => [],
@@ -23916,6 +23931,7 @@ suite('AgentService (node dispatcher)', () => {
 				getBranch: async () => undefined,
 				getRefs: async () => [],
 				getBranches: async () => [],
+				getBranchCreationSources: async () => [],
 				getRepositoryRoot: async () => undefined,
 				getWorktreeRoots: async () => [],
 				getWorktrees: async () => [],
@@ -45517,7 +45533,7 @@ suite('AgentService (node dispatcher)', () => {
 					],
 					diffCalls: [sourceDir.toString()],
 					uncommittedFiles: [sourceFile],
-					uncommittedOperations: ['checkout', 'commit', 'discard-changes'],
+					uncommittedOperations: ['checkout', 'commit', 'create-branch', 'discard-changes'],
 				},
 				afterMaterialization: {
 					workingDirectory: worktreeDir.toString(),
