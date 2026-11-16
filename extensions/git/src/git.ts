@@ -3352,9 +3352,25 @@ export class Repository {
 		return this.getBranch(result.stdout.trim());
 	}
 
-	// TODO: Support core.commentChar
-	stripCommitMessageComments(message: string): string {
-		return message.replace(/^\s*#.*$\n?/gm, '').trim();
+	async getCommentChar(): Promise<string> {
+		try {
+			const result = await this.exec(['config', '--get', 'core.commentChar']);
+			const value = result.stdout.trim();
+
+			if (value === 'auto' || value.length === 0) {
+				return '#';
+			}
+
+			return value;
+		} catch {
+			return '#';
+		}
+	}
+
+	async stripCommitMessageComments(message: string): Promise<string> {
+		const commentChar = await this.getCommentChar();
+		const escapedChar = commentChar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		return message.replace(new RegExp(`^\\s*${escapedChar}.*$\\n?`, 'gm'), '').trim();
 	}
 
 	async getSquashMessage(): Promise<string | undefined> {
@@ -3362,7 +3378,7 @@ export class Repository {
 
 		try {
 			const raw = await fs.readFile(squashMsgPath, 'utf8');
-			return this.stripCommitMessageComments(raw);
+			return await this.stripCommitMessageComments(raw);
 		} catch {
 			return undefined;
 		}
@@ -3373,7 +3389,7 @@ export class Repository {
 
 		try {
 			const raw = await fs.readFile(mergeMsgPath, 'utf8');
-			return this.stripCommitMessageComments(raw);
+			return await this.stripCommitMessageComments(raw);
 		} catch {
 			return undefined;
 		}
@@ -3397,7 +3413,7 @@ export class Repository {
 			}
 
 			const raw = await fs.readFile(templatePath, 'utf8');
-			return this.stripCommitMessageComments(raw);
+			return await this.stripCommitMessageComments(raw);
 		} catch (err) {
 			return '';
 		}
