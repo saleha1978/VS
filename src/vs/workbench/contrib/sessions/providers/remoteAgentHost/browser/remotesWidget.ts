@@ -65,6 +65,10 @@ const remoteSetup: Record<RemoteKind, { readonly label: string; readonly descrip
 		description: localize('remotes.empty.environments.description', "Sign in to GitHub and enable environment sharing on another machine."),
 		documentation: { label: localize('remotes.docs.environments', "GitHub Environments Setup Guide"), href: GITHUB_ENVIRONMENTS_DOCS_URL },
 	},
+	devContainer: {
+		label: localize('remotes.empty.devContainers', "No Dev Containers."),
+		description: localize('remotes.empty.devContainers.description', "Use Create Dev Container on a connected SSH, WSL, or tunnel host that has Docker."),
+	},
 };
 
 const horizontalScrollbarSize = 10;
@@ -243,9 +247,10 @@ export class RemotesWidget extends Disposable {
 		const resizeObserver = this._register(new dom.DisposableResizeObserver('RemotesWidget', () => this.layout(), dom.getWindow(this.domNode)));
 		this._register(resizeObserver.observe(this.domNode));
 		this._register(autorun(reader => {
-			this.model.remotes.read(reader);
+			const remotes = this.model.remotes.read(reader);
 			this.model.tunnelAuthenticationRequired.read(reader);
-			this.kinds = getVisibleRemoteKinds(operatingSystem, this.model.environmentsEnabled.read(reader));
+			// Dev Containers are created from host rows, so their group only appears once one exists.
+			this.kinds = getVisibleRemoteKinds(operatingSystem, this.model.environmentsEnabled.read(reader), remotes.some(remote => remote.kind === 'devContainer'));
 			this.render();
 		}));
 	}
@@ -282,7 +287,9 @@ export class RemotesWidget extends Disposable {
 				void this.manageRemote(entry.remote.id, 'githubEnvironment');
 			} else if (action === 'updateServer') {
 				void this.manageRemote(entry.remote.id, 'updateServer');
-			} else if (action === 'delete' && (entry.remote.kind === 'environment' && entry.remote.canRemove || (entry.remote.kind === 'tunnel' || entry.remote.kind === 'ssh') && entry.remote.canDelete)) {
+			} else if (action === 'createDevContainer' && entry.remote.canCreateDevContainer) {
+				void this.manageRemote(entry.remote.id, 'createDevContainer');
+			} else if (action === 'delete' && (entry.remote.kind === 'environment' && entry.remote.canRemove || (entry.remote.kind === 'tunnel' || entry.remote.kind === 'ssh' || entry.remote.kind === 'devContainer') && entry.remote.canDelete)) {
 				void this.deleteRemote(entry.remote.id, entry.remote.kind);
 			}
 		}
@@ -500,7 +507,7 @@ export class RemotesWidget extends Disposable {
 		}
 	}
 
-	private async manageRemote(id: string, action: 'rename' | 'locationPreference' | 'githubEnvironment' | 'updateServer'): Promise<void> {
+	private async manageRemote(id: string, action: 'rename' | 'locationPreference' | 'githubEnvironment' | 'updateServer' | 'createDevContainer'): Promise<void> {
 		if (this.pendingActions.has(id) || this.pendingConnections.has(id)) {
 			return;
 		}
@@ -516,6 +523,8 @@ export class RemotesWidget extends Disposable {
 				await this.model.setSharedAsGitHubEnvironment(id, !remote?.gitHubEnvironment);
 			} else if (action === 'updateServer') {
 				await this.model.updateServer(id);
+			} else if (action === 'createDevContainer') {
+				await this.model.createDevContainer(id);
 			} else {
 				await this.model.rename(id);
 			}
@@ -539,7 +548,7 @@ export class RemotesWidget extends Disposable {
 		}
 	}
 
-	private async deleteRemote(id: string, kind: 'environment' | 'tunnel' | 'ssh'): Promise<void> {
+	private async deleteRemote(id: string, kind: 'environment' | 'tunnel' | 'ssh' | 'devContainer'): Promise<void> {
 		if (this.pendingActions.has(id) || this.pendingConnections.has(id)) {
 			return;
 		}
@@ -552,6 +561,8 @@ export class RemotesWidget extends Disposable {
 				await this.model.deleteTunnel(id);
 			} else if (kind === 'ssh') {
 				await this.model.deleteSSHHost(id);
+			} else if (kind === 'devContainer') {
+				await this.model.deleteDevContainer(id);
 			} else {
 				await this.model.remove(id);
 			}
@@ -593,9 +604,10 @@ export class RemotesWidget extends Disposable {
 	}
 
 	private getRemoteAriaLabel(remote: ICustomizationRemote): string {
+		const displayName = remote.description ? localize('remotes.nameWithDescription', "{0} on {1}", remote.name, remote.description) : remote.name;
 		const name = remote.pickerUnavailableReason
-			? localize('remotes.unavailablePickerName', "{0} (not shown in Environment picker: {1})", remote.name, remote.pickerUnavailableReason)
-			: remote.hidden ? localize('remotes.hiddenName', "{0} (hidden from Environment picker)", remote.name) : remote.name;
+			? localize('remotes.unavailablePickerName', "{0} (not shown in Environment picker: {1})", displayName, remote.pickerUnavailableReason)
+			: remote.hidden ? localize('remotes.hiddenName', "{0} (hidden from Environment picker)", displayName) : displayName;
 		let label = localize('remotes.accessibleRow', "{0}. Status: {1}", name,
 			getConnectionLabel(remote, this.pendingConnections.get(remote.id)));
 		const error = remote.lastConnectionError;
@@ -621,6 +633,7 @@ export class RemotesWidget extends Disposable {
 			case 'wsl': return localize('remotes.wslRefreshWarning', "Could not refresh WSL distributions. Check that WSL is available. See the Window log for more details.");
 			case 'tunnel': return localize('remotes.tunnelRefreshWarning', "Could not refresh tunnels. Check your sign-in and network connection. See the Window log for more details.");
 			case 'environment': return localize('remotes.environmentRefreshWarning', "Could not refresh environments. Check your GitHub sign-in and network connection. See the Window log for more details.");
+			case 'devContainer': return undefined;
 		}
 	}
 

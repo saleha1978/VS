@@ -234,8 +234,8 @@ export class SessionEnvironmentPicker extends Disposable {
 			kind: ActionListItemKind.Action,
 			label: environment.label,
 			description: environment.description,
-			hover: { content: this.getEnvironmentHover(environment, escapeMarkdownSyntaxTokens(environment.label)) },
-			ariaDescription: this.getEnvironmentHover(environment, environment.label),
+			hover: { content: this.getEnvironmentHover(environment, true) },
+			ariaDescription: this.getEnvironmentHover(environment, false),
 			submenuActions: showManage && this.isManagedInRemotes(environment) ? undefined : this.getActions(environment),
 			group: { title: '', icon: environment.icon },
 			item: { run: () => this.select(environment), checked: environment.id === this.selected.get()?.id },
@@ -295,7 +295,9 @@ export class SessionEnvironmentPicker extends Disposable {
 		}, ENVIRONMENT_PICKER_LIST_OPTIONS);
 	}
 
-	private getEnvironmentHover(environment: ISessionCreationEnvironment, label: string): string {
+	private getEnvironmentHover(environment: ISessionCreationEnvironment, markdown: boolean): string {
+		const format = (value: string) => markdown ? escapeMarkdownSyntaxTokens(value) : value;
+		const label = format(environment.label);
 		switch (environment.kind) {
 			case 'local':
 				return localize('environmentPicker.localHover', "Run this session directly on this computer");
@@ -305,6 +307,8 @@ export class SessionEnvironmentPicker extends Disposable {
 				return localize('environmentPicker.containerHover', "Run this session in a dev container for the selected folder");
 			case 'remote':
 				switch (this.getConnectionKind(environment)) {
+					case 'devContainer':
+						return localize('environmentPicker.devContainerHover', "Run this session in a dev container on {0}", format(this.getDevContainerHostLabel(environment) ?? ''));
 					case 'githubEnvironment':
 						return localize('environmentPicker.githubEnvironmentHover', "Run this session on {0}, shared through GitHub Environments", label);
 					case RemoteAgentHostEntryType.SSH:
@@ -324,10 +328,21 @@ export class SessionEnvironmentPicker extends Disposable {
 		return kind === RemoteAgentHostEntryType.WSL ? isWindows : !!kind;
 	}
 
-	private getConnectionKind(environment: ISessionCreationEnvironment): 'githubEnvironment' | RemoteAgentHostEntryType.SSH | RemoteAgentHostEntryType.Tunnel | RemoteAgentHostEntryType.WSL | undefined {
+	private getDevContainerHostLabel(environment: ISessionCreationEnvironment): string | undefined {
+		const provider = environment.kind === 'remote' && this.sessionsProvidersService.getProvider(environment.providerIds[0]);
+		const host = provider && isAgentHostProvider(provider) ? provider.devContainerEnvironmentHost : undefined;
+		return host && (this.remoteAgentHostService.getDisplayNameOverride(host)
+			?? this.remoteAgentHostService.configuredEntries.find(entry => getEntryAddress(entry) === host)?.name
+			?? host);
+	}
+
+	private getConnectionKind(environment: ISessionCreationEnvironment): 'githubEnvironment' | 'devContainer' | RemoteAgentHostEntryType.SSH | RemoteAgentHostEntryType.Tunnel | RemoteAgentHostEntryType.WSL | undefined {
 		const provider = environment.kind === 'remote' && this.sessionsProvidersService.getProvider(environment.providerIds[0]);
 		if (!provider || !isAgentHostProvider(provider) || !provider.remoteAddress) {
 			return undefined;
+		}
+		if (provider.devContainerEnvironmentHost) {
+			return 'devContainer';
 		}
 		if (this.environmentService.enabled && this.environmentService.accountKey
 			&& this.environmentService.hosts.get().some(host => host.kind === 'user-local' && cloudSandboxAddress(host.id) === provider.remoteAddress)) {

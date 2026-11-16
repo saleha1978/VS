@@ -166,12 +166,17 @@
 }
 
 .remotes-widget .remotes-name,
+.remotes-widget .remotes-remote-description,
 .remotes-widget .remotes-empty-description,
 .remotes-widget .remotes-connection-text {
 	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+.remotes-widget .remotes-remote-description {
+	color: var(--vscode-descriptionForeground);
 }
 
 .remotes-widget .remotes-connection-state {
@@ -298,6 +303,7 @@
 }
 
 .remotes-widget .remotes-group-count[hidden],
+.remotes-widget .remotes-remote-description[hidden],
 .remotes-widget .remotes-github-environment[hidden],
 .remotes-widget .remotes-group-progress[hidden],
 .remotes-widget .remotes-empty-signin[hidden],

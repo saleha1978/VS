@@ -27,12 +27,15 @@ import { IQuickInputService } from '../../../../../../platform/quickinput/common
 import { IProgress, IProgressService } from '../../../../../../platform/progress/common/progress.js';
 import { IRemoteTunnelService, TunnelStatus } from '../../../../../../platform/remoteTunnel/common/remoteTunnel.js';
 import { IStorageService, StorageScope } from '../../../../../../platform/storage/common/storage.js';
+import { logSettingExperimentTrigger } from '../../../../../../platform/telemetry/common/experimentTrigger.js';
+import { ITelemetryService } from '../../../../../../platform/telemetry/common/telemetry.js';
 import { IAgentHostSessionsProvider, isAgentHostProvider, isRemoteSessionCreationEnvironment } from '../../../common/agentHostSessionsProvider.js';
+import { areDevContainerEnvironmentsEnabled, DevContainerEnvironmentsEnabledSettingId, IDevContainerAgentHostService, IDevContainerEnvironment } from '../../../common/devContainerAgentHostService.js';
 import { ISessionsProvidersService } from '../../../browser/sessionsProvidersService.js';
 import { changeRemoteAgentHostLocationPreference, confirmTunnelDeletion, disconnectSSHEntry, reconnectRemoteHost, removeRemoteHost, renameRemoteHost, sshConnectionKey, upgradeRemoteHost } from './remoteHostOptions.js';
 import { getRemoteAgentHostPickerKey, RemoteAgentHostPickerVisibility } from './remoteAgentHostPickerVisibility.js';
 
-export const remoteKinds = ['ssh', 'wsl', 'tunnel', 'environment'] as const;
+export const remoteKinds = ['ssh', 'wsl', 'tunnel', 'environment', 'devContainer'] as const;
 export type RemoteKind = typeof remoteKinds[number];
 
 export const remoteKindLabels: Record<RemoteKind, string> = {
@@ -40,6 +43,7 @@ export const remoteKindLabels: Record<RemoteKind, string> = {
 	wsl: localize('remotes.wsl', "WSL"),
 	tunnel: localize('remotes.tunnels', "Dev Tunnels"),
 	environment: localize('remotes.environments', "GitHub Environments"),
+	devContainer: localize('remotes.devContainers', "Dev Containers"),
 };
 
 export interface ICustomizationRemote {
@@ -47,6 +51,8 @@ export interface ICustomizationRemote {
 	readonly kind: RemoteKind;
 	readonly name: string;
 	readonly detail: string;
+	/** Secondary text shown after the name, such as the host of a Dev Container. */
+	readonly description?: string;
 	readonly canRemove: boolean;
 	readonly canDelete?: boolean;
 	readonly connectionStatus: RemoteAgentHostConnectionStatus;
@@ -58,6 +64,8 @@ export interface ICustomizationRemote {
 	readonly canShareAsGitHubEnvironment?: boolean;
 	/** Present while this remote's agent host is, or is being, shared as a GitHub environment. */
 	readonly gitHubEnvironment?: IRemoteGitHubEnvironmentShare;
+	/** Whether a Dev Container environment can be created on this connected host now. */
+	readonly canCreateDevContainer?: boolean;
 }
 
 export type IRemoteRefreshProgress =
@@ -79,16 +87,21 @@ export interface IRemotesModel extends IDisposable {
 	setSharedAsGitHubEnvironment(id: string, shared: boolean): Promise<void>;
 	deleteTunnel(id: string): Promise<void>;
 	deleteSSHHost(id: string): Promise<void>;
+	/** Creates a Dev Container environment on a connected SSH, WSL, or tunnel host. */
+	createDevContainer(id: string): Promise<void>;
+	/** Deletes a Dev Container environment, including its container and files, after confirmation. */
+	deleteDevContainer(id: string): Promise<void>;
 	remove(id: string): Promise<void>;
 	setHidden(id: string, hidden: boolean): void;
 }
 
-export function getVisibleRemoteKinds(operatingSystem: OperatingSystem, environmentsEnabled = false): readonly RemoteKind[] {
+export function getVisibleRemoteKinds(operatingSystem: OperatingSystem, environmentsEnabled = false, devContainers = false): readonly RemoteKind[] {
 	return [
 		...(environmentsEnabled ? ['environment' as const] : []),
 		'tunnel',
 		...(operatingSystem === OperatingSystem.Windows ? ['wsl' as const] : []),
 		'ssh',
+		...(devContainers ? ['devContainer' as const] : []),
 	];
 }
 
@@ -96,7 +109,8 @@ type RemoteTarget =
 	| { readonly kind: 'ssh'; readonly entry: IRemoteAgentHostEntry }
 	| { readonly kind: 'wsl'; readonly distro: string; readonly name: string }
 	| { readonly kind: 'tunnel'; readonly tunnel: ITunnelInfo; readonly authProvider?: 'github' | 'microsoft'; readonly source: 'discovered' | 'cached' }
-	| { readonly kind: 'environment'; readonly host: IMissionControlHost; readonly account: string };
+	| { readonly kind: 'environment'; readonly host: IMissionControlHost; readonly account: string }
+	| { readonly kind: 'devContainer'; readonly environment: IDevContainerEnvironment };
 
 export class RemotesModel extends Disposable implements IRemotesModel {
 	private readonly targets = new Map<string, RemoteTarget>();
@@ -134,6 +148,8 @@ export class RemotesModel extends Disposable implements IRemotesModel {
 		@IProductService private readonly productService: IProductService,
 		@IRemoteTunnelService remoteTunnelService: IRemoteTunnelService,
 		@IRemoteGitHubEnvironmentSharingService private readonly remoteSharing: IRemoteGitHubEnvironmentSharingService,
+		@IDevContainerAgentHostService private readonly devContainerService: IDevContainerAgentHostService,
+		@ITelemetryService private readonly telemetryService: ITelemetryService,
 	) {
 		super();
 		this.pickerVisibility = this._register(new RemoteAgentHostPickerVisibility(storageService));
@@ -149,6 +165,8 @@ export class RemotesModel extends Disposable implements IRemotesModel {
 			remoteSharing.shareable.read(reader);
 			remoteSharing.shares.read(reader);
 			remoteSharing.environmentIds.read(reader);
+			devContainerService.environments.read(reader);
+			devContainerService.environmentHosts.read(reader);
 			for (const provider of providersService.getProviders().filter(isAgentHostProvider)) {
 				provider.localRegistration?.read(reader);
 			}
@@ -298,6 +316,7 @@ export class RemotesModel extends Disposable implements IRemotesModel {
 				this.tunnelService.cacheTunnel(target.tunnel, target.authProvider);
 				break;
 			case 'environment':
+			case 'devContainer':
 				break;
 		}
 		this.update();
@@ -484,6 +503,34 @@ export class RemotesModel extends Disposable implements IRemotesModel {
 		}
 	}
 
+	async createDevContainer(id: string): Promise<void> {
+		const remote = this._remotes.get().find(remote => remote.id === id);
+		if (!this.enabled || this._store.isDisposed || !remote?.canCreateDevContainer) {
+			throw new Error(localize('remotes.devContainerUnavailable', "Dev Containers cannot be created on this remote now. Connect to it and make sure Docker is installed."));
+		}
+		await this.devContainerService.createEnvironment(id);
+	}
+
+	async deleteDevContainer(id: string): Promise<void> {
+		const remote = this._remotes.get().find(remote => remote.id === id);
+		if (!this.enabled || this._store.isDisposed || remote?.kind !== 'devContainer') {
+			throw new Error(localize('remotes.unavailable', "This remote is no longer available."));
+		}
+		const { confirmed } = await this.dialogService.confirm({
+			type: 'warning',
+			message: localize('remotes.deleteDevContainerConfirmation', "Are you sure you want to delete Dev Container '{0}'?", remote.name),
+			detail: localize('remotes.deleteDevContainerDetail', "This removes the container and its Docker volume from {0}, including all files in the container. Sessions that ran in it can no longer continue.", remote.detail),
+			primaryButton: localize('remotes.deleteDevContainerButton', "&&Delete"),
+		});
+		if (!confirmed) {
+			return;
+		}
+		if (this._store.isDisposed || !this.enabled) {
+			throw new CancellationError();
+		}
+		await this.devContainerService.deleteEnvironment(id);
+	}
+
 	private async checkSSHHostDeletion(id: string): Promise<IRemoteAgentHostSSHConnection> {
 		if (!this.enabled || this._store.isDisposed) {
 			throw new CancellationError();
@@ -586,6 +633,7 @@ export class RemotesModel extends Disposable implements IRemotesModel {
 			case 'wsl': return `${WSL_ADDRESS_PREFIX}${target.distro}`;
 			case 'tunnel': return `${TUNNEL_ADDRESS_PREFIX}${target.tunnel.tunnelId}`;
 			case 'environment': return cloudSandboxAddress(target.host.id);
+			case 'devContainer': return target.environment.address;
 		}
 	}
 
@@ -649,7 +697,7 @@ export class RemotesModel extends Disposable implements IRemotesModel {
 		// Remotes this client shares as GitHub environments are already listed under their own kind.
 		const sharedEnvironmentIds = environmentsEnabled ? this.remoteSharing.environmentIds.read(reader) : new Set<string>();
 		for (const [id, target] of this.targets) {
-			if (target.kind === 'environment') {
+			if (target.kind === 'environment' || target.kind === 'devContainer') {
 				this.targets.delete(id);
 			}
 		}
@@ -660,6 +708,15 @@ export class RemotesModel extends Disposable implements IRemotesModel {
 					const target = { kind: 'environment' as const, host, account };
 					this.targets.set(this.getId(target), target);
 				}
+			}
+		}
+		// Hosts are computed in every experiment arm, so the trigger below precedes any difference between the arms.
+		const devContainerHosts = this.enabled ? this.devContainerService.environmentHosts.read(reader) : new Set<string>();
+		const devContainersEnabled = this.enabled && areDevContainerEnvironmentsEnabled(this.configurationService);
+		if (devContainersEnabled) {
+			for (const environment of this.devContainerService.environments.read(reader)) {
+				const target = { kind: 'devContainer' as const, environment };
+				this.targets.set(this.getId(target), target);
 			}
 		}
 		const providers = this.providersService.getProviders().filter(isAgentHostProvider);
@@ -695,6 +752,7 @@ export class RemotesModel extends Disposable implements IRemotesModel {
 		for (const [id, target] of this.targets) {
 			let name: string;
 			let detail: string;
+			let description: string | undefined;
 			let unavailableReason: string | undefined;
 			switch (target.kind) {
 				case 'ssh':
@@ -715,6 +773,13 @@ export class RemotesModel extends Disposable implements IRemotesModel {
 					unavailableReason = target.host.status !== 'online'
 						? localize('remotes.environmentOffline', "This environment is not online. Start its owning application before connecting.") : undefined;
 					break;
+				case 'devContainer': {
+					const sourceAddress = target.environment.sourceAddress;
+					name = localize('remotes.devContainerName', "Dev Container");
+					detail = this.remoteAgentHostService.getDisplayNameOverride(sourceAddress) ?? providersByAddress.get(sourceAddress)?.label ?? sourceAddress;
+					description = detail;
+					break;
+				}
 			}
 			const provider = providersByAddress.get(id);
 			// This window already runs sessions on this computer, so its own sharing registrations are not remotes to manage.
@@ -726,8 +791,15 @@ export class RemotesModel extends Disposable implements IRemotesModel {
 			}
 			const canRemove = target.kind === 'environment' || this.registered.has(id) && !!provider && provider.canRemove !== false;
 			const hidden = this.pickerVisibility.isHidden(this.getPickerKey(target), reader);
+			const isDevContainerHost = (target.kind === 'ssh' || target.kind === 'wsl' || target.kind === 'tunnel') && devContainerHosts.has(id);
+			if (isDevContainerHost) {
+				logSettingExperimentTrigger(this.telemetryService, DevContainerEnvironmentsEnabledSettingId);
+			}
 			remotes.push({
 				id, kind: target.kind, name, detail, canRemove, unavailableReason,
+				...(description ? { description } : {}),
+				...(isDevContainerHost && devContainersEnabled ? { canCreateDevContainer: true } : {}),
+				...(target.kind === 'devContainer' ? { canDelete: true } : {}),
 				...(target.kind === 'tunnel' ? {
 					canDelete: this.tunnelService.canDeleteTunnels && !!this.remoteTunnelStatus
 						&& !isTunnelHosted(this.remoteTunnelStatus.type === 'connected' ? this.remoteTunnelStatus.info : undefined, target.tunnel),
