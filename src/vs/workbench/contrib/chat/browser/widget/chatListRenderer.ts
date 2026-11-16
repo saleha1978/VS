@@ -15,6 +15,7 @@ import { CachedListVirtualDelegate, IListElementRenderDetails } from '../../../.
 import { IStickyScrollNodeSourceRange } from '../../../../../base/browser/ui/tree/abstractTree.js';
 import { ITreeNode, ITreeRenderer } from '../../../../../base/browser/ui/tree/tree.js';
 import { ActionRunner, IAction, toAction } from '../../../../../base/common/actions.js';
+import { disposableTimeout } from '../../../../../base/common/async.js';
 import { coalesce, distinct } from '../../../../../base/common/arrays.js';
 import { findLast } from '../../../../../base/common/arraysFind.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
@@ -68,6 +69,7 @@ import { ChatQuestionCarouselData, maskPasswordAnswers } from '../../common/mode
 import { localChatSessionType } from '../../common/chatSessionsService.js';
 import { getChatSessionType } from '../../common/model/chatUri.js';
 import { getExplicitFileOrImageAttachmentSummary, IChatRequestVariableEntry, isExplicitFileOrImageVariableEntry, isPasteVariableEntry } from '../../common/attachments/chatVariableEntries.js';
+import { formatScheduledRequestTime, formatScheduledRequestTimeFromNow, getScheduledRequestTimeFromNowChange } from '../../common/widget/chatScheduledRequestTime.js';
 import { getStickyScrollTargetItem, IChatChangesSummaryPart, IChatCodeCitations, IChatErrorDetailsPart, IChatReferences, IChatRendererContent, IChatRequestViewModel, IChatResponseViewModel, IChatViewModel, IChatWorkingProgress, isRequestVM, isResponseVM, IChatPendingDividerViewModel, isPendingDividerVM, IChatTurnPillsPart, IChatScheduledRequestViewModel, isScheduledRequestVM } from '../../common/model/chatViewModel.js';
 import { getNWords } from '../../common/model/chatWordCounter.js';
 import { CHAT_OPEN_AGENT_HOST_CHAT_COMMAND_ID, ChatAgentLocation, ChatConfiguration, ChatModeKind, ChatProgressAnimation, ChatProgressVerbosity, CollapsedToolsDisplayMode, ThinkingDisplayMode } from '../../common/constants.js';
@@ -2394,7 +2396,7 @@ export class ChatListItemRenderer extends Disposable implements ITreeRenderer<Ch
 		templateData.scheduledRequestAnchor = content;
 		const header = dom.append(content, dom.$('.scheduled-request-header'));
 		dom.append(header, dom.$('span.codicon.codicon-clock', { 'aria-hidden': 'true' }));
-		dom.append(header, dom.$('span.scheduled-request-description', undefined, element.description));
+		this.renderScheduledRequestTime(header, element, store);
 		const toolbarContainer = dom.append(templateData.rowContainer, dom.$('.request-hover.scheduled-request-actions'));
 		store.add(toDisposable(() => toolbarContainer.remove()));
 		const toolbar = store.add(this.instantiationService.createInstance(WorkbenchToolBar, toolbarContainer, {
@@ -2454,18 +2456,27 @@ export class ChatListItemRenderer extends Disposable implements ITreeRenderer<Ch
 			dom.append(container, dom.$('.scheduled-request-attachments', undefined,
 				localize('scheduledRequestAttachments', "Attachments: {0}", retainedAttachments.join(', '))));
 		}
-		const buttons = store.add(new ButtonBar(dom.append(container, dom.$('.scheduled-request-editor-actions'))));
-		const time = buttons.addButton({ ...defaultButtonStyles, secondary: true, supportIcons: true, title: editing.description });
-		time.label = `$(clock) ${editing.description}`;
-		time.element.classList.add('scheduled-request-edit-time');
-		time.element.setAttribute('aria-label', localize('scheduledRequestEditTime', "Change send time, {0}", editing.description));
-		const save = buttons.addButton({ ...defaultButtonStyles });
-		save.label = localize('scheduledRequestSave', "Save");
-		const cancel = buttons.addButton({ ...defaultButtonStyles, secondary: true });
+		const actions = dom.append(container, dom.$('.scheduled-request-editor-actions'));
+		const buttons = store.add(new ButtonBar(actions));
+		const cancel = buttons.addButton({ secondary: true });
 		cancel.label = localize('scheduledRequestCancelEdit', "Cancel");
+		cancel.element.classList.add('scheduled-request-cancel');
+		const sendLabel = localize('scheduledRequestSendAt', "Send {0}", editing.description);
+		const save = buttons.addButton({ ...defaultButtonStyles, supportIcons: true, title: sendLabel, ariaLabel: sendLabel });
+		save.label = sendLabel;
+		save.element.classList.add('scheduled-request-save-label');
+		const time = buttons.addButton({
+			...defaultButtonStyles, supportIcons: true,
+			ariaLabel: localize('scheduledRequestEditTime', "Change send time, {0}", editing.description),
+		});
+		time.label = '$(chevron-down)';
+		time.element.classList.add('scheduled-request-edit-time');
+		time.element.setAttribute('aria-haspopup', 'dialog');
+		const split = dom.append(actions, dom.$('.scheduled-request-save'));
+		split.append(save.element, dom.$('span.scheduled-request-save-separator', { 'aria-hidden': 'true' }), time.element);
 		let busy = false;
 		const saveAction = toAction({
-			id: 'scheduledRequest.save', label: save.label,
+			id: 'scheduledRequest.save', label: sendLabel,
 			run: async () => {
 				if (busy) {
 					return;
@@ -2487,6 +2498,28 @@ export class ChatListItemRenderer extends Disposable implements ITreeRenderer<Ch
 			save.enabled = cancel.enabled = time.enabled = !editing.isSaving?.read(reader);
 		}));
 		this._onDidRerender.fire(templateData);
+	}
+
+	/** How long until the request sends ("Sending in 3 hours"), kept current while it shows; hovering shows the exact time. */
+	private renderScheduledRequestTime(container: HTMLElement, element: IChatScheduledRequestViewModel, store: DisposableStore): void {
+		const runAt = element.runAt;
+		if (!runAt) {
+			dom.append(container, dom.$('span.scheduled-request-description', undefined, element.description));
+			return;
+		}
+		const time = dom.append(container, dom.$('span.scheduled-request-description.scheduled-request-time'));
+		const fromNow = dom.append(time, dom.$('time.scheduled-request-from-now', { datetime: runAt }));
+		const exact = dom.append(time, dom.$('time.scheduled-request-exact', { datetime: runAt }));
+		const timer = store.add(new MutableDisposable());
+		const update = () => {
+			const now = Date.now();
+			fromNow.textContent = formatScheduledRequestTimeFromNow(runAt, now);
+			exact.textContent = formatScheduledRequestTime(runAt, now);
+			const change = getScheduledRequestTimeFromNowChange(runAt, now);
+			// Just past the change, so "Sending in 3 hours" turns over when the sessions list's card does.
+			timer.value = change === undefined ? undefined : disposableTimeout(update, change + 1);
+		};
+		update();
 	}
 
 	private focusScheduledRequest(templateData: IChatListItemTemplate, element: HTMLElement): void {

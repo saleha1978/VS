@@ -352,12 +352,13 @@ suite('Scheduled chat handoffs', () => {
 		assert.deepStrictEqual({
 			actions: item.actions.map(action => ({ label: action.label, hasIcon: !!action.class })),
 			editIsShared: item.editAction === item.actions[0],
-			calls: fixture.calls, loadedChats: fixture.loadedChats, openedChats: fixture.openedChats,
+			calls: fixture.calls, loadedChats: fixture.loadedChats, openedChats: fixture.openedChats.map(chat => chat.toString()),
 			input: fixture.recoveredInputs.map(input => input.inputText), editingText: editing.text,
 			enabled: fixture.automations.get()[0].enabled,
 		}, {
 			actions: ['Edit', 'Send Now', 'Reschedule...', 'Cancel Schedule'].map(label => ({ label, hasIcon: true })),
-			editIsShared: true, calls: [], loadedChats: [], openedChats: [],
+			// Editing from the sessions-list card opens the prompt in its original chat.
+			editIsShared: true, calls: ['openChat'], loadedChats: [], openedChats: [conversation.chatResource.toString()],
 			input: [], editingText: input.inputText, enabled: true,
 		});
 	});
@@ -384,7 +385,7 @@ suite('Scheduled chat handoffs', () => {
 			recoveryText: parse(fixture.storage.get('sessions.scheduledChatHandoffs', StorageScope.PROFILE)!).handoffs[0].input.inputText,
 		}, {
 			text: 'Changed scheduled message', prompt: 'Changed scheduled message', enabled: true,
-			runAt: customTime.toISOString(), calls: ['update'], recoveredInputs: [],
+			runAt: customTime.toISOString(), calls: ['openChat', 'update'], recoveredInputs: [],
 			editing: undefined, anchors: [true, true], recoveryText: 'Changed scheduled message',
 		});
 	}));

@@ -2775,6 +2775,11 @@ export class ChatWidget extends Disposable implements IChatWidget {
 		const store = this._editingDisposables.value = new DisposableStore();
 		this.createInlineInput(item, store, undefined);
 		const input = this.input;
+		input.setModelSessionTypeOverride({ sessionType: getChatSessionType(request.sessionResource) }, request.sessionResource);
+		const modelId = this.inputPart.currentLanguageModel;
+		if (modelId) {
+			void input.requestModelByIdentifier(modelId, this.inputPart.getModelConfiguration(modelId));
+		}
 		input.attachmentModel.addContext(...state.input?.attachments ?? []);
 		input.setValue(state.text, false);
 		if (state.input?.references) {

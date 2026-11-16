@@ -933,10 +933,16 @@ suite('ChatWidget', () => {
 		return widget;
 	}
 
-	test('scheduled inline editing captures text deletion and attachment removal', async () => {
+	test('scheduled inline editing keeps the conversation model and captures text and attachment edits separately', async () => {
 		await withAsyncTestCodeEditor('Message', {}, async editor => {
 			const attachmentChange = store.add(new Emitter<void>());
 			const attachments = [{ id: 'context', kind: 'generic' as const, name: 'Context', value: 'Captured context' }];
+			const resource = URI.parse('agent-host-copilot:/session/non-main');
+			const modelId = 'agent-host-copilot:test-model';
+			const modelConfiguration = { reasoningEffort: 'high' };
+			let scope: Parameters<ChatInputPart['setModelSessionTypeOverride']> | undefined;
+			let selection: Parameters<ChatInputPart['requestModelByIdentifier']> | undefined;
+			const draft = 'Keep this unfinished draft';
 			const state: IChatScheduledRequestEditing = {
 				text: 'Message', runAt: '2099-01-15T10:00:00Z', description: 'Tomorrow',
 				selectTime: toAction({ id: 'time', label: 'Time', run: async () => { } }),
@@ -947,6 +953,8 @@ suite('ChatWidget', () => {
 				onDidChangeDraft: Event.None,
 				attachmentModel: { attachments, onDidChange: attachmentChange.event, addContext: () => { } },
 				setValue: (text: string) => editor.setValue(text),
+				setModelSessionTypeOverride: (...args: Parameters<ChatInputPart['setModelSessionTypeOverride']>) => { scope = args; },
+				requestModelByIdentifier: async (...args: Parameters<ChatInputPart['requestModelByIdentifier']>) => { selection = args; return true; },
 				focus: () => editor.focus(),
 			};
 			const widget = Object.setPrototypeOf({
@@ -957,20 +965,26 @@ suite('ChatWidget', () => {
 				_editingAutoScrollHold: store.add(new MutableDisposable<IDisposable>()),
 				createInlineInput: () => { },
 				inputPart: {
+					currentLanguageModel: modelId,
+					getModelConfiguration: () => modelConfiguration,
+					inputEditor: { getValue: () => draft, setValue: () => { throw new Error('Must not replace the main draft'); } },
 					toggleChatInputOverlay: () => { },
 					dnd: { setDisabledOverlay: () => { } },
 					onDidClickOverlay: Event.None,
 				},
 				listWidget: { acquireAutoScrollHold: () => toDisposable(() => { }) },
 			}, ChatWidget.prototype);
-			widget.renderScheduledRequestInput({}, { id: 'later', editing: state });
+			widget.renderScheduledRequestInput({}, { id: 'later', sessionResource: resource, editing: state });
 			editor.executeEdits('test', [{ range: new Range(1, 4, 1, 8), text: '' }]);
 			const afterDeletion = { text: state.text, attachmentIds: state.input?.attachments.map(attachment => attachment.id) };
 			attachments.length = 0;
 			attachmentChange.fire();
-			assert.deepStrictEqual({ afterDeletion, input: state.input }, {
+			assert.deepStrictEqual({ afterDeletion, input: state.input, scope, selection, draft: widget.inputPart.inputEditor.getValue() }, {
 				afterDeletion: { text: 'Mes', attachmentIds: ['context'] },
 				input: { inputText: 'Mes', attachments: [], references: [] },
+				scope: [{ sessionType: 'agent-host-copilot' }, resource],
+				selection: [modelId, modelConfiguration],
+				draft,
 			});
 		});
 	});
