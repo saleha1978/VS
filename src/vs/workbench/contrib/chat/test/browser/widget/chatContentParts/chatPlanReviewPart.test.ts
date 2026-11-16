@@ -13,6 +13,7 @@ import { IDialogService } from '../../../../../../../platform/dialogs/common/dia
 import { TestDialogService } from '../../../../../../../platform/dialogs/test/common/testDialogService.js';
 import { FileChangesEvent, FileChangeType, IFileService } from '../../../../../../../platform/files/common/files.js';
 import { workbenchInstantiationService } from '../../../../../../test/browser/workbenchTestServices.js';
+import { TestInstantiationService } from '../../../../../../../platform/instantiation/test/common/instantiationServiceMock.js';
 import { IPlanReviewFeedbackService, PlanReviewFeedbackService } from '../../../../browser/planReviewFeedback/planReviewFeedbackService.js';
 import { ChatPlanReviewPart, IChatPlanReviewPartOptions } from '../../../../browser/widget/chatContentParts/chatPlanReviewPart.js';
 import { IChatContentPartRenderContext } from '../../../../browser/widget/chatContentParts/chatContentParts.js';
@@ -87,6 +88,7 @@ suite('ChatPlanReviewPart', () => {
 	let lastSubmitResult: IChatPlanReviewResult | undefined;
 	let submitCount = 0;
 	let lastFeedbackService: IPlanReviewFeedbackService | undefined;
+	let lastInstantiationService: TestInstantiationService | undefined;
 	let lastEditorService: IEditorService | undefined;
 	let lastTextFileService: ITextFileService | undefined;
 	let lastModelService: IModelService | undefined;
@@ -106,6 +108,7 @@ suite('ChatPlanReviewPart', () => {
 		instantiationService.stub(IPlanReviewFeedbackService, feedbackService); instantiationService.stub(IUserInteractionService, new MockUserInteractionService());
 
 		lastFeedbackService = feedbackService;
+		lastInstantiationService = instantiationService;
 		lastEditorService = instantiationService.get(IEditorService);
 		lastTextFileService = instantiationService.get(ITextFileService);
 		lastModelService = instantiationService.get(IModelService);
@@ -139,6 +142,7 @@ suite('ChatPlanReviewPart', () => {
 		lastSubmitResult = undefined;
 		submitCount = 0;
 		lastFeedbackService = undefined;
+		lastInstantiationService = undefined;
 		lastEditorService = undefined;
 		lastTextFileService = undefined;
 		lastModelService = undefined;
@@ -608,6 +612,47 @@ suite('ChatPlanReviewPart', () => {
 					feedbackInlineMarkdown: 'Inline comments on `plan.md`:\n- **Line 5:** Keep this comment',
 				},
 			});
+		});
+
+		test('copies of a review, such as one per widget that shows its chat, share its inline comments', async () => {
+			const review = createMockReviewWithPlan();
+			createWidget(review);
+			const planUri = URI.revive(review.planUri!);
+			const service = lastFeedbackService!;
+			service.addFeedback(planUri, 5, 1, 'From A');
+			const results: IChatPlanReviewResult[] = [];
+			const createCopy = () => store.add(lastInstantiationService!.createInstance(ChatPlanReviewPart, review, createMockContext(), { onSubmit: result => { results.push(result); } }));
+			const comments = () => service.getFeedback(planUri).map(item => item.text);
+
+			const copy = createCopy();
+			const seenByCopy = comments();
+			copy.dispose();
+			const keptForA = comments();
+			createCopy();
+			const submitted = await service.submitAllFeedback(planUri);
+
+			assert.deepStrictEqual({ seenByCopy, keptForA, submitted, results: results.map(result => result.feedbackInlineMarkdown) }, {
+				seenByCopy: ['From A'],
+				keptForA: ['From A'],
+				submitted: true,
+				results: ['Inline comments on `plan.md`:\n- **Line 5:** From A'],
+			});
+		});
+
+		test('the copy of a review whose overall comment the user wrote submits it, also when another copy registered later', async () => {
+			const review = createMockReviewWithPlan();
+			createWidget(review);
+			const first = widget;
+			const planUri = URI.revive(review.planUri!);
+			const results: IChatPlanReviewResult[] = [];
+			store.add(lastInstantiationService!.createInstance(ChatPlanReviewPart, review, createMockContext(), { onSubmit: result => { results.push(result); } }));
+			const textarea = first.domNode.querySelector('.chat-plan-review-feedback-textarea') as HTMLTextAreaElement;
+			textarea.value = 'Written in the first copy';
+			textarea.dispatchEvent(new Event('input'));
+
+			const submitted = await lastFeedbackService!.submitAllFeedback(planUri);
+
+			assert.deepStrictEqual({ submitted, overall: lastSubmitResult?.feedbackOverall, fromLaterCopy: results.length }, { submitted: true, overall: 'Written in the first copy', fromLaterCopy: 0 });
 		});
 
 		test('renders comments list and updates Submit Feedback count when service has items', async () => {

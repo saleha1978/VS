@@ -14,7 +14,7 @@ import { Emitter, Event } from '../../../../../../base/common/event.js';
 import { toErrorMessage } from '../../../../../../base/common/errorMessage.js';
 import { MarkdownString } from '../../../../../../base/common/htmlContent.js';
 import { KeyCode } from '../../../../../../base/common/keyCodes.js';
-import { Disposable, DisposableStore, MutableDisposable } from '../../../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, IDisposable, MutableDisposable } from '../../../../../../base/common/lifecycle.js';
 import { ScrollbarVisibility } from '../../../../../../base/common/scrollable.js';
 import Severity from '../../../../../../base/common/severity.js';
 import { basename, isEqual } from '../../../../../../base/common/resources.js';
@@ -137,6 +137,7 @@ export class ChatPlanReviewPart extends Disposable implements IChatContentPart {
 				submitFeedback: () => this.submitFeedback(),
 				submitAction: action => this.submitApproval(action),
 				reject: () => this.submitRejection(),
+				identity: review,
 			}));
 			registrationStore.add(this._planReviewFeedbackService.onDidChangeFeedback(uri => {
 				if (uri.toString() === planUriString) {
@@ -301,6 +302,10 @@ export class ChatPlanReviewPart extends Disposable implements IChatContentPart {
 		dom.show(this._outdatedBadgeEl);
 		this._planChangeListeners.clear();
 		status(localize('chat.planReview.outdatedAnnouncement', 'Plan summary is outdated'));
+	}
+
+	addDisposable(disposable: IDisposable): void {
+		this._register(disposable);
 	}
 
 	hasSameContent(other: IChatRendererContent, _followingContent: IChatRendererContent[], _element: ChatTreeItem): boolean {
