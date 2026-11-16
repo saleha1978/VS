@@ -12,6 +12,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { Disposable, IDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { IFileService, FileOperation, IFileStatWithMetadata } from '../../../../platform/files/common/files.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { CancellationError, isCancellationError } from '../../../../base/common/errors.js';
 import { IWorkingCopyService } from './workingCopyService.js';
 import { IWorkingCopy } from './workingCopy.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
@@ -244,8 +245,12 @@ export interface IWorkingCopyFileService {
 	 *
 	 * Working copy owners can listen to the `onWillRunWorkingCopyFileOperation` and
 	 * `onDidRunWorkingCopyFileOperation` events to participate.
+	 *
+	 * @param onDidCompleteOperation called with the resulting stat for every
+	 * operation of the batch that finished successfully. Allows callers to
+	 * know the completed subset when the batch is cancelled mid-way.
 	 */
-	move(operations: IMoveOperation[], token: CancellationToken, undoInfo?: IFileOperationUndoRedoInfo): Promise<readonly IFileStatWithMetadata[]>;
+	move(operations: IMoveOperation[], token: CancellationToken, undoInfo?: IFileOperationUndoRedoInfo, onDidCompleteOperation?: (stat: IFileStatWithMetadata) => void): Promise<readonly IFileStatWithMetadata[]>;
 
 	/**
 	 * Will copy working copies matching the provided resources and corresponding children
@@ -253,8 +258,12 @@ export interface IWorkingCopyFileService {
 	 *
 	 * Working copy owners can listen to the `onWillRunWorkingCopyFileOperation` and
 	 * `onDidRunWorkingCopyFileOperation` events to participate.
+	 *
+	 * @param onDidCompleteOperation called with the resulting stat for every
+	 * operation of the batch that finished successfully. Allows callers to
+	 * know the completed subset when the batch is cancelled mid-way.
 	 */
-	copy(operations: ICopyOperation[], token: CancellationToken, undoInfo?: IFileOperationUndoRedoInfo): Promise<readonly IFileStatWithMetadata[]>;
+	copy(operations: ICopyOperation[], token: CancellationToken, undoInfo?: IFileOperationUndoRedoInfo, onDidCompleteOperation?: (stat: IFileStatWithMetadata) => void): Promise<readonly IFileStatWithMetadata[]>;
 
 	/**
 	 * Will delete working copies matching the provided resources and children
@@ -387,15 +396,15 @@ export class WorkingCopyFileService extends Disposable implements IWorkingCopyFi
 		return stats;
 	}
 
-	async move(operations: IMoveOperation[], token: CancellationToken, undoInfo?: IFileOperationUndoRedoInfo): Promise<IFileStatWithMetadata[]> {
-		return this.doMoveOrCopy(operations, true, token, undoInfo);
+	async move(operations: IMoveOperation[], token: CancellationToken, undoInfo?: IFileOperationUndoRedoInfo, onDidCompleteOperation?: (stat: IFileStatWithMetadata) => void): Promise<IFileStatWithMetadata[]> {
+		return this.doMoveOrCopy(operations, true, token, undoInfo, onDidCompleteOperation);
 	}
 
-	async copy(operations: ICopyOperation[], token: CancellationToken, undoInfo?: IFileOperationUndoRedoInfo): Promise<IFileStatWithMetadata[]> {
-		return this.doMoveOrCopy(operations, false, token, undoInfo);
+	async copy(operations: ICopyOperation[], token: CancellationToken, undoInfo?: IFileOperationUndoRedoInfo, onDidCompleteOperation?: (stat: IFileStatWithMetadata) => void): Promise<IFileStatWithMetadata[]> {
+		return this.doMoveOrCopy(operations, false, token, undoInfo, onDidCompleteOperation);
 	}
 
-	private async doMoveOrCopy(operations: IMoveOperation[] | ICopyOperation[], move: boolean, token: CancellationToken, undoInfo?: IFileOperationUndoRedoInfo): Promise<IFileStatWithMetadata[]> {
+	private async doMoveOrCopy(operations: IMoveOperation[] | ICopyOperation[], move: boolean, token: CancellationToken, undoInfo?: IFileOperationUndoRedoInfo, onDidCompleteOperation?: (stat: IFileStatWithMetadata) => void): Promise<IFileStatWithMetadata[]> {
 		const stats: IFileStatWithMetadata[] = [];
 
 		// validate move/copy operation before starting
@@ -416,6 +425,10 @@ export class WorkingCopyFileService extends Disposable implements IWorkingCopyFi
 
 		try {
 			for (const { file: { source, target }, overwrite } of operations) {
+				if (token.isCancellationRequested) {
+					throw new CancellationError();
+				}
+
 				// if source and target are not equal, handle dirty working copies
 				// depending on the operation:
 				// - move: revert both source and target (if any)
@@ -429,8 +442,34 @@ export class WorkingCopyFileService extends Disposable implements IWorkingCopyFi
 				if (move) {
 					stats.push(await this.fileService.move(source, target, overwrite));
 				} else {
-					stats.push(await this.fileService.copy(source, target, overwrite));
+
+					// Remember whether the target existed upfront: when the
+					// copy is cancelled before any content was transferred, a
+					// pre-existing target must not be deleted by the cleanup
+					const targetExisted = await this.fileService.exists(target);
+
+					let copyStarted = false;
+					try {
+						stats.push(await this.fileService.copy(source, target, overwrite, () => copyStarted = true, token));
+					} catch (error) {
+
+						// Best effort cleanup of a partially copied target
+						// when the copy was cancelled, unless the target
+						// existed before and the copy never got to transfer
+						// any content to it
+						if (isCancellationError(error) && (!targetExisted || copyStarted)) {
+							try {
+								await this.fileService.del(target, { recursive: true });
+							} catch (error) {
+								// ignore
+							}
+						}
+
+						throw error;
+					}
 				}
+
+				onDidCompleteOperation?.(stats[stats.length - 1]);
 			}
 		} catch (error) {
 
