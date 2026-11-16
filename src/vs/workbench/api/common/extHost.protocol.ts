@@ -118,8 +118,24 @@ export type IconPathDto =
 	| { light: UriComponents; dark: UriComponents }
 	| ThemeIcon;
 
+export interface IWorkspaceFolderLocationDto {
+	uri: UriComponents;
+	label: string;
+	description?: string;
+	isPrimary: boolean;
+	isCurrent: boolean;
+}
+
+export interface IWorkspaceFolderLocationsDto {
+	folder: UriComponents;
+	locations: IWorkspaceFolderLocationDto[];
+}
+
 export interface IWorkspaceData extends IStaticWorkspaceData {
-	folders: { uri: UriComponents; name: string; index: number }[];
+	/**
+	 * `primary` is the primary location of the folder, which differs from `uri` when the folder is at an alternate location.
+	 */
+	folders: { uri: UriComponents; name: string; index: number; primary?: UriComponents }[];
 }
 
 export interface IConfigurationInitData extends IConfigurationData {
@@ -2640,6 +2656,7 @@ export interface ExtHostTreeViewsShape {
 export interface ExtHostWorkspaceShape {
 	$initializeWorkspace(workspace: IWorkspaceData | null, trusted: boolean): void;
 	$acceptWorkspaceData(workspace: IWorkspaceData | null): void;
+	$acceptWorkspaceFolderLocations(data: IWorkspaceFolderLocationsDto[]): void;
 	$handleTextSearchResult(result: search.IRawFileMatch2, requestId: number): void;
 	$onDidGrantWorkspaceTrust(): void;
 	$onDidChangeWorkspaceTrustedFolders(): void;
