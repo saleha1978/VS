@@ -340,6 +340,8 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 					canSubmit: derived(this, reader => this._canSendRequest.read(reader) && !this._sending.read(reader)),
 					hasContent: this.options.hasAdditionalSendContent,
 					label: this.options.sendButtonLabel,
+					// Submitting from the user's submit on, also while the widget saves files first, so its host doesn't retarget it
+					beginSubmit: () => this.options.inputSnapshot?.beginSubmit() ?? Disposable.None,
 				},
 				submitHandler: async (query, _mode, attachedContext) => {
 					await this._send(query, attachedContext ?? [], false);
@@ -1078,7 +1080,17 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 		}
 	}
 
+	/** Sends the input, marked as submitting from here on, before any check or wait, so its host doesn't retarget it meanwhile. */
 	private async _send(rawQuery: string, attachments: readonly IChatRequestVariableEntry[], background: boolean): Promise<boolean> {
+		const submitting = this.options.inputSnapshot?.beginSubmit();
+		try {
+			return await this._doSend(rawQuery, attachments, background);
+		} finally {
+			submitting?.dispose();
+		}
+	}
+
+	private async _doSend(rawQuery: string, attachments: readonly IChatRequestVariableEntry[], background: boolean): Promise<boolean> {
 		const widget = this._widget;
 		const query = rawQuery.trim();
 		const hasAdditionalSendContent = this.options.hasAdditionalSendContent?.get() ?? false;
@@ -1197,12 +1209,23 @@ export class SharedChatInputComposer extends Disposable implements INewSessionCo
 		};
 		try {
 			const session = this.options.session.get();
-			if (!hasAdditionalSendContent && session && await this.chatSubmitRequestHandlerService.tryHandle({
+			const handled = !hasAdditionalSendContent && !!session && await this.chatSubmitRequestHandlerService.tryHandle({
 				sessionResource: session.resource,
 				providerId: session.providerId,
 				sessionId: session.sessionId,
 				input: query,
-			})) {
+			});
+			// The handler can wait, during which the composer can be closed or move to another draft, also with the same input:
+			// the request is for the draft it was written for, so it is never sent to another, nor once that is closed, and the
+			// input, now another draft's, stays as it is, also where the handler acted on the request, which then dropped nothing.
+			if (this._store.isDisposed || (session && this.options.session.get()?.sessionId !== session.sessionId)) {
+				userInteraction?.cancel('notDispatched');
+				if (!handled && !this._store.isDisposed && isInputAlive()) {
+					this.notificationService.warn(localize('sharedChatInputComposer.draftChanged', "The request was not sent because its chat changed while it waited. Its input was kept."));
+				}
+				return false;
+			}
+			if (handled) {
 				userInteraction?.cancel('notDispatched');
 				// The handler has acted on the request; an input replaced while it ran is newer, so it is kept.
 				if (!isInputAlive() || !isDraftReplaced()) {
